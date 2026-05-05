@@ -1,0 +1,20 @@
+llm:
+  - name: qwen
+    type: openai_compatible
+    api_key: ${QWEN_API_KEY}          # 建议通过环境变量注入，不要硬编码
+    api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+    model: qwen3-plus
+    temperature: 0.7
+    max_tokens: 4096
+    roles:
+      - planner                       # 用于 Plan-and-Execute 的规划阶段
+      - executor                      # 用于 ReAct 执行阶段
+
+  # 可扩展更多模型，按 role 分工
+  # - name: claude
+  #   type: openai_compatible
+  #   api_key: ${CLAUDE_API_KEY}
+  #   api_base: https://api.anthropic.com/v1
+  #   model: claude-sonnet-4-20250514
+  #   roles:
+  #     - planner
