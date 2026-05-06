@@ -1,0 +1,3 @@
+openai>=2.0.0
+pyyaml>=6.0
+tavily-python>=0.7.0
