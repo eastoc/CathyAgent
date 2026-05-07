@@ -1,0 +1,75 @@
+name: file_ops
+version: 0.1.0
+description: 受限的本地文件操作（读 / 列目录 / 写）。所有路径必须位于 root 子树内。
+
+tools:
+  - name: read_file
+    description: >-
+      读取本地文本文件内容（仅 utf-8）。仅允许访问当前工作目录子树。
+      适用于查看代码、配置、日志、Markdown 等文本文件。
+    input_schema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: 相对工作目录的文件路径，例如 README.md 或 cathy/agent.py
+        max_bytes:
+          type: integer
+          description: 最多读取的字节数，默认 50000
+          default: 50000
+          minimum: 1
+      required: [path]
+      additionalProperties: false
+
+  - name: list_dir
+    description: >-
+      列出指定目录下的条目（文件与子目录）。仅允许访问工作目录子树，
+      适合在不知道有哪些文件时先探查。
+    input_schema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: 相对工作目录的目录路径；不传则列出工作目录本身
+          default: "."
+        show_hidden:
+          type: boolean
+          description: 是否包含以 . 开头的隐藏项，默认 false
+          default: false
+      required: []
+      additionalProperties: false
+
+  - name: write_file
+    description: >-
+      把字符串写入指定路径（utf-8）。仅允许写在工作目录子树内。
+      默认覆盖；目录不存在会自动创建。属于潜在副作用工具，调用前请确认确实需要。
+    input_schema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: 相对工作目录的目标文件路径
+        content:
+          type: string
+          description: 要写入的全部内容（utf-8）
+        overwrite:
+          type: boolean
+          description: 已存在时是否覆盖，默认 true；false 时已存在会报错
+          default: true
+      required: [path, content]
+      additionalProperties: false
+
+permissions:
+  filesystem: sandbox
+  network: none
+  shell: false
+
+execution:
+  runtime: python
+  entrypoint: main:FileOpsPlugin
+  timeout_seconds: 10
+  sandbox: false
+
+metadata:
+  trust_level: verified
+  tags: [filesystem]

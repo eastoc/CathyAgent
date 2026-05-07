@@ -1,0 +1,38 @@
+name: web_search
+version: 0.1.0
+description: 联网搜索（基于 Tavily），返回带链接的摘要结果。
+
+tools:
+  - name: web_search
+    description: >-
+      在互联网上搜索最新信息。当用户问题涉及时效性、事实核对、新闻或你不知道的内容时调用。
+      返回若干条带标题、链接、摘要的结果。
+    input_schema:
+      type: object
+      properties:
+        query:
+          type: string
+          description: 搜索关键词或完整问句，中英文均可
+        max_results:
+          type: integer
+          description: 返回结果条数，默认 5
+          default: 5
+          minimum: 1
+          maximum: 10
+      required: [query]
+      additionalProperties: false
+
+permissions:
+  network: ["api.tavily.com"]
+  filesystem: none
+  shell: false
+
+execution:
+  runtime: python
+  entrypoint: main:WebSearchPlugin
+  timeout_seconds: 30
+  sandbox: false
+
+metadata:
+  trust_level: builtin
+  tags: [search, web]
