@@ -3,6 +3,11 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# CathyAgent 运行时数据
+data/
+*.db
+*.db-journal
+
 # C extensions
 *.so
 

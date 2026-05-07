@@ -18,3 +18,7 @@ AGENT:
   # 项目级规则请写入项目根的 AGENTS.md 或 CATHY.md，会自动注入。
   # 这里仅保留可选的临时附加指令：
   extra_system: ""
+
+SESSION:
+  db_path: data/sessions.db
+  token_budget: 16000      # 历史消息硬截断的 token 预算（字符数/4 估算）
