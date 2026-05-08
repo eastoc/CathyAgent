@@ -84,7 +84,6 @@ class Agent:
         for step in range(self.config.max_steps):
             response = self.llm.chat(messages, tools=schemas)
             msg = response.choices[0].message
-            #print("[msg]:",msg.reasoning_content)
             if not msg.tool_calls:
                 content = (msg.content or "").strip()
                 assistant_msg = Message(role="assistant", content=content)
@@ -103,7 +102,14 @@ class Agent:
             )
             self.store.append_message(session.id, assistant_msg)
             session.append(assistant_msg)
-            messages.append(assistant_msg.to_openai_dict())
+
+            # DeepSeek thinking 模式：带 tool_calls 的 assistant 消息必须把
+            # reasoning_content 一起回灌，否则下一轮 400 invalid_request。
+            api_assistant = assistant_msg.to_openai_dict()
+            reasoning = getattr(msg, "reasoning_content", None)
+            if reasoning:
+                api_assistant["reasoning_content"] = reasoning
+            messages.append(api_assistant)
 
             # 逐个执行工具
             for tc in msg.tool_calls:

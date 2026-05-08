@@ -72,11 +72,11 @@ def _resolve_db_path(cfg: dict) -> Path:
 
 def build_runtime(cfg: dict | None = None) -> tuple[Agent, SessionStore]:
     cfg = cfg if cfg is not None else load_config()
-    llm_conf = get_llm(cfg, name="qwen")
+    llm_conf = get_llm(cfg, name="deepseek")
 
     if "${" in str(llm_conf.get("api_key", "")):
         sys.exit(
-            "QWEN_API_KEY 未注入。请在 config/.env 中设置 QWEN_API_KEY=... 后重试。"
+            "DEEPSEEK_API_KEY 未注入。请在 config/.env 中设置 DEEPSEEK_API_KEY=... 后重试。"
         )
 
     llm = LLMClient(

@@ -85,13 +85,17 @@ class SubagentRunner:
                 return result
 
             tool_calls_dicts = _tool_calls_to_dicts(msg.tool_calls)
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": msg.content or "",
-                    "tool_calls": tool_calls_dicts,
-                }
-            )
+            assistant_dict: dict[str, Any] = {
+                "role": "assistant",
+                "content": msg.content or "",
+                "tool_calls": tool_calls_dicts,
+            }
+            # DeepSeek thinking 模式：reasoning_content 必须随 assistant.tool_calls
+            # 一起回灌到下一轮 API，否则服务端 400。
+            reasoning = getattr(msg, "reasoning_content", None)
+            if reasoning:
+                assistant_dict["reasoning_content"] = reasoning
+            messages.append(assistant_dict)
             result.add(
                 "assistant_tool_calls",
                 {"step": step, "tool_calls": tool_calls_dicts},
