@@ -1,4 +1,4 @@
-"""LLM 客户端封装：OpenAI Chat Completions（兼容 qwen / DeepSeek 等）。"""
+"""LLM 客户端封装：OpenAI Chat Completions（兼容 DeepSeek / qwen 等 OpenAI 兼容端点）。"""
 
 from __future__ import annotations
 
