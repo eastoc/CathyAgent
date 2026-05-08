@@ -29,7 +29,7 @@
 | Skills = Markdown | `skills/<name>/SKILL.md` 自动注册为 tool；调用 = 创建带 SKILL.md 的 subagent |
 | 多级上下文 | System / Project（`AGENTS.md`）/ Skill / Session / Scratchpad 五层装配 |
 | 权限分级 | `trust_level`：builtin → 直接 / verified → 审计 / untrusted → 提权确认 |
-| Hooks | 通过 `PreToolUse`/`PostToolUse` 中间件预留扩展点 |
+| Hooks | **Phase 3.5** 单独实现 8 类事件 hook（含 `PreToolUse` / `PostToolUse` / `UserPromptSubmit` / `Stop` / `SubagentStop` / `PreCompact` 等），双后端：Python 反射 + Command 子进程（兼容 `.claude/settings.json`） |
 
 ---
 
@@ -144,6 +144,43 @@
 
 ---
 
+### Phase 3.5｜Hooks 中间件（机制层）
+
+**目标**：在主循环和 subagent 关键节点埋统一的 hook 接入点，让审计 / 安全 / 流程改写有统一入口。本阶段只做**机制**，具体安全策略在 Phase 4 落地。
+
+**做：**
+- 新增包 `cathy/hooks/`：`events.py` / `manager.py` / `runners.py` / `builtin.py`。
+- 8 类事件埋点（与 Claude Code 协议一致）：
+  | 事件 | 埋点位置 | 可改写 |
+  |---|---|---|
+  | `SessionStart` | `cli.main` 拿到 session 之后 | inject_context |
+  | `UserPromptSubmit` | `Agent.run` 入口、user_msg 持久化前 | rewrite_user_input / block / inject_context |
+  | `PreToolUse` | `Agent.run` 中 `tools.call()` 之前 | rewrite_params / block |
+  | `PostToolUse` | `Agent.run` 中 `tools.call()` 之后 | inject_context（拼进 result） |
+  | `Stop` | final 分支 return 之前 | rewrite_final_answer / block（强制再循环） |
+  | `SubagentStop` | `SubagentToolPlugin.execute` 之后 | rewrite_final_answer |
+  | `PreCompact` | `ContextAssembler._fit_to_budget` 入口 | 自定义压缩策略 |
+  | `Notification` | 任意位置主动调 | 路由到外部（IM / 邮件） |
+- 双执行后端：
+  - `type: python` —— `target: "module:func"` 反射调用，零开销，支持类型化 `HookEvent → HookDecision`。
+  - `type: command` —— stdin 收 JSON / stdout 返决策 / `exit 2 = block`，**100% 兼容 `.claude/settings.json` 形态**，CC 用户脚本可直接迁移。
+- `HookDecision` 字段：`block` / `block_reason` / `inject_context` / `rewrite_params` / `rewrite_user_input` / `rewrite_final_answer` / `extra`。
+- 配置：`config/config.yaml` 新增 `HOOKS:` 段；自动合并项目根 `.claude/settings.json` 若存在。
+- 内置 hook 三件套（演示性，非安全策略）：
+  - `audit_log` —— `PostToolUse` 把每次调用写到 `data/audit.jsonl`（含 session / tool / params / result / latency_ms）
+  - `block_dangerous_paths` —— `PreToolUse` 拦截 `write_file` 写到 `~/.ssh` / `/etc/` 等
+  - `strip_secrets` —— `UserPromptSubmit` 用 regex 剔除 `sk-...` / `api_key=...` 之类敏感字符串
+
+**验收**：
+- 配置 `block_dangerous_paths` 后，让 LLM 试图 `write_file('/etc/foo', ...)`，工具返回结构化阻断错误，model 能 self-correct。
+- `data/audit.jsonl` 每次 tool call 一行；`tail -f` 能实时看到主 agent 与子 agent 的全部调用。
+- `python tools/cc_hook.py < event.json` 这种 CC 风格脚本被加载执行后行为正确（exit 2 等价 `block=True`）。
+- Phase 0–3 全部既有测试不破坏；新增 hooks 单测 ≥ 5 条（matcher / 串联合并 / block 短路 / 超时 / Python+Command 混用）。
+
+**暂缓**：可视化 hook 配置 UI（Phase 8）；远程 hook（HTTP webhook）；并发 hook 执行。
+
+---
+
 ### Phase 4｜沙盒与权限分级（安全底座）
 
 **目标**：让文件写入、shell 执行等危险操作可控。
@@ -157,7 +194,10 @@
   | `builtin` | 直接执行 |
   | `verified` | 直接执行 + 审计日志 |
   | `untrusted` | CLI 弹"允许 / 拒绝 / 始终允许"提示 |
-- 引入 `PreToolUse` / `PostToolUse` 中间件 hook 接口，内置实现 = JSONL 审计日志。
+- 在 Phase 3.5 的 hook 系统上注入安全策略 builtin hooks：
+  - `permission_gate`（PreToolUse）：按 `trust_level` 决定 allow / audit / ask（`untrusted` 弹 CLI 提示）
+  - `workspace_chroot`（PreToolUse）：file_ops 类工具路径强制校验在 `workspaces/<session_id>/` 内
+  - `tool_audit`（PostToolUse）：把每次调用写入 `data/audit.jsonl`（与 Phase 3.5 的 `audit_log` 复用同一实现）
 
 **验收**：
 - 沙盒外路径调用 `write_file` 直接报错。
@@ -292,7 +332,8 @@ flowchart LR
   P0[Phase 0<br/>ReAct 骨架] --> P1[Phase 1<br/>插件化]
   P1 --> P2[Phase 2<br/>多级上下文]
   P2 --> P3[Phase 3<br/>Subagent + Skills]
-  P3 --> P4[Phase 4<br/>沙盒 + 权限]
+  P3 --> P35[Phase 3.5<br/>Hooks 中间件]
+  P35 --> P4[Phase 4<br/>沙盒 + 权限]
   P4 --> P5[Phase 5<br/>Memory + MCP]
   P5 --> P6[Phase 6<br/>Plan-Execute + 可观测]
   P6 --> P7[Phase 7<br/>iMessage]
@@ -301,6 +342,7 @@ flowchart LR
 ```
 
 > Phase 9 依赖 Phase 5（MCP 客户端），可与 Phase 6/7/8 并行。
+> Phase 6 的"可观测性"在 Phase 3.5 之后实现量减半（结构化 JSONL 日志直接由 PostToolUse hook 产出）。
 
 ---
 
@@ -321,6 +363,7 @@ flowchart LR
 | 语言 | Python（harness 全栈）→ TS（客户端层 Phase 8 起） |
 | 编排 | Single-loop ReAct（Plan-Execute 后置） |
 | 关键杠杆 | Subagent 早做（Phase 3），上下文压缩与能力组合都靠它 |
+| 中间件 | Hooks 在 Phase 3.5 落地，作为后续安全 / 审计 / 改写的统一入口 |
 | 入口顺序 | CLI（P0）→ iMessage（P7）→ Web UI（P8） |
 | 工具协议 | OpenAI function-calling → Plugin Manifest → MCP |
 | 安全 | trust_level 三档 + sandbox chroot；Docker / seccomp 后置 |

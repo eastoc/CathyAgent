@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 # 允许 `python cathy/cli.py` 这种直接运行方式：把项目根加入 sys.path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -16,6 +17,7 @@ from config.config import get_llm, load_config  # noqa: E402
 
 from .agent import Agent, AgentConfig  # noqa: E402
 from .context import ContextAssembler  # noqa: E402
+from .hooks import HookEvent, HookManager, SESSION_START  # noqa: E402
 from .llm import LLMClient  # noqa: E402
 from .plugins import PluginRegistry  # noqa: E402
 from .session.store import SessionStore  # noqa: E402
@@ -35,9 +37,11 @@ from .subagent import (  # noqa: E402
 
 BANNER = """\
 ==================================================
- CathyAgent · Phase 3 · Subagent + Skills
+ CathyAgent · Phase 3.5 · Subagent + Skills + Hooks
  输入问题开始，输入 quit / exit / q 退出
 =================================================="""
+
+MVP_HOOK_EVENTS = {"UserPromptSubmit", "PreToolUse", "PostToolUse"}
 
 
 def _on_event(event: str, payload: dict) -> None:
@@ -70,7 +74,28 @@ def _resolve_db_path(cfg: dict) -> Path:
     return p
 
 
-def build_runtime(cfg: dict | None = None) -> tuple[Agent, SessionStore]:
+def _hook_log(entry: dict) -> None:
+    """HookManager 加载 / 执行错误时的轻量日志（stderr 风格输出到控制台）。"""
+    print(f"[hook][{entry.get('phase', '?')}] {entry}")
+
+
+def _select_hooks_config(cfg: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """按 HOOKS_PROFILE 选择生效 hooks。
+
+    - mvp（默认）：只启用 UserPromptSubmit / PreToolUse / PostToolUse
+    - full：启用 HOOKS 中全部事件
+    """
+    hooks_cfg = dict(cfg.get("HOOKS") or {})
+    profile = str(cfg.get("HOOKS_PROFILE") or "mvp").strip().lower()
+    if profile == "full":
+        return hooks_cfg, "full"
+    if profile not in {"", "mvp"}:
+        print(f"[hooks] 未知 HOOKS_PROFILE={profile!r}，回退为 mvp")
+    slim = {k: v for k, v in hooks_cfg.items() if k in MVP_HOOK_EVENTS}
+    return slim, "mvp"
+
+
+def build_runtime(cfg: dict | None = None) -> tuple[Agent, SessionStore, HookManager]:
     cfg = cfg if cfg is not None else load_config()
     llm_conf = get_llm(cfg, name="deepseek")
 
@@ -98,6 +123,17 @@ def build_runtime(cfg: dict | None = None) -> tuple[Agent, SessionStore]:
     loaded = registry.discover_and_load()
     print(f"[plugins] loaded: {loaded}")
 
+    # ---- Hooks（Phase 3.5 中间件） ----
+    active_hooks_cfg, hooks_profile = _select_hooks_config(cfg)
+    hooks = HookManager.from_config(
+        active_hooks_cfg,
+        project_root=_PROJECT_ROOT,
+        on_log=_hook_log,
+    )
+    summary = hooks.summary()
+    if summary:
+        print(f"[hooks] profile={hooks_profile} active: {summary}")
+
     # ---- Skills（静态模板）：read_skill 工具 + system prompt 注入目录 ----
     skills = discover_skills([_PROJECT_ROOT / "skills"])
     skills_plugin = SkillsPlugin(skills=skills)
@@ -110,7 +146,7 @@ def build_runtime(cfg: dict | None = None) -> tuple[Agent, SessionStore]:
     planner_executor = PlannerExecutorSubagent(llm=llm, tools=subagent_tool_view)
     registry.register_internal_plugin(
         build_subagent_tool_manifest(planner_executor),
-        SubagentToolPlugin(planner_executor),
+        SubagentToolPlugin(planner_executor, hooks=hooks),
     )
     print("[subagents] exposed: planner_executor")
 
@@ -123,6 +159,7 @@ def build_runtime(cfg: dict | None = None) -> tuple[Agent, SessionStore]:
         skill_catalog=skill_catalog,
         extra=str(agent_cfg.get("extra_system") or "").strip(),
         token_budget=int(session_cfg.get("token_budget", 8000)),
+        hooks=hooks,
     )
 
     store = SessionStore(_resolve_db_path(cfg))
@@ -134,8 +171,9 @@ def build_runtime(cfg: dict | None = None) -> tuple[Agent, SessionStore]:
         store=store,
         config=AgentConfig(max_steps=int(agent_cfg.get("max_steps", 12))),
         on_event=_on_event,
+        hooks=hooks,
     )
-    return agent, store
+    return agent, store, hooks
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -157,7 +195,7 @@ def _print_session_list(store: SessionStore) -> None:
 
 def main() -> None:
     args = _parse_args()
-    agent, store = build_runtime()
+    agent, store, hooks = build_runtime()
 
     if args.list_sessions:
         _print_session_list(store)
@@ -165,6 +203,21 @@ def main() -> None:
         return
 
     session = store.get_or_create(args.session)
+    is_new = len(session.messages) == 0
+
+    # === Hook: SessionStart（拿到 session 后立刻派发，可往 system prompt 注入上下文） ===
+    if hooks.has_hooks_for(SESSION_START):
+        decision = hooks.dispatch(
+            HookEvent(
+                type=SESSION_START,
+                session_id=session.id,
+                payload={"new": is_new, "msg_count": len(session.messages)},
+            )
+        )
+        if decision.inject_context:
+            agent.assembler.append_system_layer(
+                f"[hook:SessionStart]\n{decision.inject_context}"
+            )
 
     print(BANNER)
     descriptors = agent.tools.list_tools()
