@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from .hooks import HookManager
     from .session.models import Message, Session
 
 DEFAULT_SYSTEM_PROMPT = """\
@@ -158,11 +159,24 @@ class ContextAssembler:
         skill_catalog: str = "",
         extra: str = "",
         token_budget: int = 8000,
+        hooks: "HookManager | None" = None,
     ) -> None:
         self.system_prompt = build_system_prompt(
             project_root=project_root, skill_catalog=skill_catalog, extra=extra,
         )
         self.token_budget = max(256, int(token_budget))
+        self.hooks = hooks  # 仅 PreCompact 用；None 等价于无 hook
+
+    def append_system_layer(self, text: str) -> None:
+        """运行期追加一段到 system prompt 末尾。
+
+        SessionStart hook 的 inject_context 会通过这个接口拼到底层 SYSTEM 层之后，
+        立即对所有后续轮次生效。
+        """
+        text = (text or "").strip()
+        if not text:
+            return
+        self.system_prompt = f"{self.system_prompt}\n\n---\n\n{text}"
 
     def assemble(
         self,
@@ -188,6 +202,26 @@ class ContextAssembler:
         total_tokens = sum(self._msg_tokens(m) for m in msgs)
         if total_tokens <= self.token_budget:
             return list(msgs)
+
+        # === Hook: PreCompact（命中预算才触发；MVP 只通知，不接受改写） ===
+        if self.hooks is not None:
+            try:
+                from .hooks import HookEvent, PRE_COMPACT  # 避免顶层循环导入
+
+                if self.hooks.has_hooks_for(PRE_COMPACT):
+                    self.hooks.dispatch(
+                        HookEvent(
+                            type=PRE_COMPACT,
+                            payload={
+                                "total_tokens": total_tokens,
+                                "budget": self.token_budget,
+                                "msg_count": len(msgs),
+                            },
+                        )
+                    )
+            except Exception:
+                # PreCompact 仅观测性质，永不影响主流程
+                pass
 
         # 找所有 user 消息位置作为合法切分点
         user_indices = [i for i, m in enumerate(msgs) if m.role == "user"]

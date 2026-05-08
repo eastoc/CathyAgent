@@ -22,3 +22,29 @@ AGENT:
 SESSION:
   db_path: data/sessions.db
   token_budget: 16000      # 历史消息硬截断的 token 预算（字符数/4 估算）
+
+# hooks 配置档位：
+# - mvp  (默认): 仅启用 UserPromptSubmit / PreToolUse / PostToolUse
+# - full        : 启用 HOOKS 中全部事件
+HOOKS_PROFILE: mvp
+
+# Phase 3.5 中间件：8 类事件 + Python/Command 双后端。
+# 形态与 Claude Code .claude/settings.json 的 hooks 段一致；
+# 项目根若同时存在 .claude/settings.json，会自动 merge 在末尾。
+#
+# 默认开启的 3 件套都是演示性 hook，按需注释/删除；自定义 hook 推荐放到
+#   plugins/community/<name>/hooks.py  + 在此引用 'cathy.hooks.builtin' 同款形态。
+HOOKS:
+  PreToolUse:
+    - matcher: "write_file"
+      hooks:
+        - type: python
+          target: "cathy.hooks.builtin:block_dangerous_paths"
+  PostToolUse:
+    - hooks:                       # matcher 缺省 = 所有工具
+        - type: python
+          target: "cathy.hooks.builtin:audit_log"
+  UserPromptSubmit:
+    - hooks:
+        - type: python
+          target: "cathy.hooks.builtin:strip_secrets"

@@ -40,7 +40,7 @@ python -m cathy
 
 退出：`quit` / `exit` / `q` / Ctrl+C。
 
-## 当前能力（Phase 3 · Skill / Subagent 分离版）
+## 当前能力（Phase 3.5 · Skill + Subagent + Hooks 中间件）
 
 | 模块 | 状态 |
 |------|------|
@@ -54,6 +54,7 @@ python -m cathy
 | **Skills**（静态模板 + `read_skill` 工具，progressive disclosure） | ✅ |
 | **Subagent**：`planner_executor` 基于 LangGraph 的 plan-execute-replan | ✅ |
 | **ToolView**（白/黑名单视图，限定子 agent 可用工具集） | ✅ |
+| **Hooks 中间件**：8 类事件 + Python/Command 双后端，兼容 `.claude/settings.json` | ✅ |
 | Sandbox / Memory / MCP / iMessage | 见 `ROADMAP.md`，后续 Phase 实现 |
 
 ## Skill 与 Subagent 是两件事
@@ -105,6 +106,67 @@ START → planner ──→ executor ──┬─── (plan 仍有步骤) ─�
 主 agent 何时该派给 `planner_executor`：任务**复杂、多步、中间产物长**；
 简单单步任务直接 ReAct 完成即可，不要无脑派出。
 
+## Hooks 中间件（Phase 3.5）
+
+8 类事件埋点 + Python/Command 双后端；配置形态与 Claude Code 的 `.claude/settings.json` 完全一致，
+项目根若放了 `.claude/settings.json`，会自动 merge 到 `config.yaml.HOOKS` 之后。
+
+> 默认运行档位是 `HOOKS_PROFILE: mvp`，只启用 3 个事件：`UserPromptSubmit` / `PreToolUse` / `PostToolUse`。  
+> 若要启用全部 8 类事件，把 `config/config.yaml` 里的 `HOOKS_PROFILE` 改成 `full`。
+
+| 事件 | 埋点 | 常用改写 |
+|------|------|---------|
+| `SessionStart`     | `cli.main` 拿到 session 之后        | `inject_context` 写入 system prompt 末尾 |
+| `UserPromptSubmit` | `Agent.run` 入口、user 持久化前     | `rewrite_user_input` / `block` / `inject_context` |
+| `PreToolUse`       | `tools.call()` 之前                 | `rewrite_params` / `block`（结构化错误回灌让 LLM 自纠） |
+| `PostToolUse`      | `tools.call()` 之后                 | `inject_context` 拼到 tool result 末尾 |
+| `Stop`             | final 分支 return 之前              | `rewrite_final_answer` / `block`（强制再循环） |
+| `SubagentStop`     | `SubagentToolPlugin.execute` 之后   | `rewrite_final_answer` |
+| `PreCompact`       | `ContextAssembler._fit_to_budget`   | 仅观测（MVP 不接受改写） |
+| `Notification`     | 任意位置主动调                      | 路由到外部（IM / 邮件） |
+
+### MVP 默认三件套（`HOOKS_PROFILE: mvp`）
+
+| Hook | 事件 | 作用 |
+|------|------|------|
+| `cathy.hooks.builtin:strip_secrets`        | `UserPromptSubmit` | 用 regex 把 `sk-...` / `ghp_...` / `api_key=...` 等替换为 `[REDACTED]` |
+| `cathy.hooks.builtin:block_dangerous_paths`| `PreToolUse`/`write_file` | 拦截写入 `/etc` / `~/.ssh` / `~/.aws` 等敏感路径 |
+| `cathy.hooks.builtin:audit_log`            | `PostToolUse` | 每次 tool call 写一行到 `data/audit.jsonl` |
+
+### 自定义 hook（两种方式）
+
+**Python（推荐，零开销，类型化）：**
+
+```python
+# plugins/community/my_audit/hook.py
+from cathy.hooks import HookDecision, HookEvent
+
+def my_post_tool(event: HookEvent) -> HookDecision:
+    if (event.payload or {}).get("tool") == "web_search":
+        return HookDecision(inject_context="提示：来自 web_search 的内容请优先核对来源")
+    return HookDecision()
+```
+
+```yaml
+# config/config.yaml
+HOOKS:
+  PostToolUse:
+    - hooks:
+        - { type: python, target: "plugins.community.my_audit.hook:my_post_tool" }
+```
+
+**Command（兼容 Claude Code 已有脚本）：**
+
+```yaml
+HOOKS:
+  PreToolUse:
+    - matcher: "write_file"
+      hooks:
+        - type: command
+          command: "python tools/cc_hook.py"   # stdin=event.json，stdout=decision.json，exit 2 = block
+          timeout: 5
+```
+
 ## 添加自己的插件
 
 1. 在 `plugins/community/<name>/` 创建目录
@@ -121,24 +183,29 @@ CathyAgent/
     config.yaml               # LLM_API / TAVILY_API_KEY / AGENT / SESSION
     config.py                 # 配置加载器
   cathy/
-    agent.py                  # ReAct 主循环（session-aware）
-    context.py                # 多级 system prompt 装配 + 预算截断 + skill 目录注入
+    agent.py                  # ReAct 主循环（session-aware，接 4 类 hook）
+    context.py                # 多级 system prompt 装配 + 预算截断 + PreCompact hook
     llm.py                    # OpenAI 兼容客户端
-    cli.py                    # REPL 入口
+    cli.py                    # REPL 入口（构造 HookManager + 触发 SessionStart）
     plugins/
       base.py                 # ToolPlugin 接口
       manifest.py             # plugin.yaml 解析
       registry.py             # PluginRegistry + ToolView
     session/                  # Session / Message + SQLite 持久化
-    skills/                   # 【新】静态模板子系统
+    skills/                   # 静态模板子系统
       manifest.py             # SKILL.md 解析
       loader.py               # discover + 目录字符串
       plugin.py               # SkillsPlugin（read_skill 工具）
-    subagent/                 # 【新】运行实体子系统
+    subagent/                 # 运行实体子系统
       base.py                 # Subagent / SubagentResult 抽象
       runner.py               # SubagentRunner（朴素 ReAct 子循环，executor 复用）
       planner_executor.py     # LangGraph plan-execute-replan
-      tool_plugin.py          # 把 Subagent 包装成 ToolPlugin
+      tool_plugin.py          # 把 Subagent 包装成 ToolPlugin（接 SubagentStop）
+    hooks/                    # 【新 Phase 3.5】中间件子系统
+      events.py               # HookEvent / HookDecision / 8 事件常量 / merge
+      runners.py              # PythonRunner + CommandRunner
+      manager.py              # HookManager：matcher / 串联 / .claude 兼容
+      builtin.py              # audit_log / block_dangerous_paths / strip_secrets
   plugins/
     builtin/                  # web_search / file_ops / current_datetime
     community/                # 用户插件
