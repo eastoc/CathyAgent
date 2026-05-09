@@ -14,11 +14,30 @@ from cathy.plugins import PluginError, ToolPlugin
 class FileOpsPlugin(ToolPlugin):
     def __init__(self) -> None:
         self._root: Path | None = None
+        self._workspace_parent: Path | None = None
 
     def initialize(self, config: dict[str, Any]) -> None:
-        root = Path(config.get("root") or ".").expanduser().resolve()
-        if not root.exists() or not root.is_dir():
-            raise PluginError(f"file_ops.root 不是有效目录: {root}")
+        # 新配置：workspace_root（推荐）；旧配置：root（兼容）
+        parent = Path(
+            config.get("workspace_root")
+            or config.get("root")
+            or "."
+        ).expanduser().resolve()
+        parent.mkdir(parents=True, exist_ok=True)
+        if not parent.is_dir():
+            raise PluginError(f"file_ops.workspace_root 不是有效目录: {parent}")
+        self._workspace_parent = parent
+        self._root = parent
+
+    def attach_session(self, session_id: str) -> None:
+        """切换到会话专属工作空间：<workspace_root>/<session_id>/。"""
+        if self._workspace_parent is None:
+            raise PluginError("file_ops 未初始化")
+        sid = (session_id or "").strip()
+        if not sid:
+            raise PluginError("session_id 不能为空")
+        root = (self._workspace_parent / sid).resolve()
+        root.mkdir(parents=True, exist_ok=True)
         self._root = root
 
     def execute(self, tool_name: str, params: dict[str, Any]) -> str:

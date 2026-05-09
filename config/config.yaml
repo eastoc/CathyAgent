@@ -36,10 +36,17 @@ HOOKS_PROFILE: mvp
 #   plugins/community/<name>/hooks.py  + 在此引用 'cathy.hooks.builtin' 同款形态。
 HOOKS:
   PreToolUse:
+    - hooks:                       # 全工具权限闸门（按 trust_level）
+        - type: python
+          target: "cathy.hooks.builtin:permission_gate"
     - matcher: "write_file"
       hooks:
         - type: python
           target: "cathy.hooks.builtin:block_dangerous_paths"
+    - matcher: "shell_exec"
+      hooks:
+        - type: python
+          target: "cathy.hooks.builtin:block_dangerous_shell_commands"
   PostToolUse:
     - hooks:                       # matcher 缺省 = 所有工具
         - type: python
@@ -48,3 +55,24 @@ HOOKS:
     - hooks:
         - type: python
           target: "cathy.hooks.builtin:strip_secrets"
+
+SANDBOX:
+  enabled: true
+  # mac 优先：seatbelt（py-sandboxrt）；若本机未装 py-sandboxrt 可先切 local_restricted
+  backend: seatbelt                 # seatbelt | local_restricted
+  workspace_root: workspaces
+  default_timeout_sec: 10
+  max_timeout_sec: 30
+  max_output_bytes: 65536
+  network:
+    allow: false
+    allowed_domains: []
+
+PERMISSION:
+  # trust_policy: allow | audit | ask | deny
+  trust_policy:
+    builtin: allow
+    verified: audit
+    untrusted: ask
+  # 在脚本/服务等无 TTY 环境，ask 无法交互时的降级策略
+  non_interactive_fallback: deny

@@ -1,8 +1,10 @@
-"""内置 hook 三件套（演示性，非完整安全策略）。
+"""内置 hook（演示性，非完整安全策略）。
 
 - audit_log              -> PostToolUse：把每次 tool call 写一行到 data/audit.jsonl
 - block_dangerous_paths  -> PreToolUse ：拦截 file_ops 写到 ~/.ssh / /etc / /System 等敏感路径
 - strip_secrets          -> UserPromptSubmit：用 regex 剔除疑似 API key 字串
+- block_dangerous_shell_commands -> PreToolUse：拦截明显高危 shell_exec 命令
+- permission_gate        -> PreToolUse：按 trust_level 执行 allow/audit/ask/deny
 
 这些函数都是无状态纯函数：入参 HookEvent，出参 HookDecision。
 通过 'cathy.hooks.builtin:func_name' 在配置里挂入。
@@ -13,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -151,6 +154,15 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)\b(api[_-]?key|token|secret)\s*[:=]\s*[\"']?([A-Za-z0-9_\-]{16,})[\"']?"),
 )
 
+# shell 级危险命令：用于 PreToolUse + shell_exec。
+_DANGEROUS_SHELL_PATTERNS = (
+    re.compile(r"\brm\s+-rf\s+/"),
+    re.compile(r":\(\)\s*\{\s*:\|\:&\s*\};:"),  # fork bomb
+    re.compile(r"\bsudo\b"),
+    re.compile(r"\bmkfs(\.[a-z0-9_]+)?\b"),
+    re.compile(r">\s*/dev/(sd[a-z]\d*|disk\d+)"),
+)
+
 
 def strip_secrets(event: HookEvent) -> HookDecision:
     """UserPromptSubmit：把疑似 secret 替换成 [REDACTED]，并附 inject_context 提醒。"""
@@ -176,4 +188,93 @@ def strip_secrets(event: HookEvent) -> HookDecision:
             f"[hook:strip_secrets] 用户输入中检测到 {hits} 处疑似密钥/令牌，已替换为 [REDACTED]。"
             "如需正常处理这些字面量，请改用 read_file 等显式来源。"
         ),
+    )
+
+
+def block_dangerous_shell_commands(event: HookEvent) -> HookDecision:
+    """PreToolUse：拦截 shell_exec 的明显高危命令。"""
+    if event.type != "PreToolUse":
+        return HookDecision.noop()
+    payload = event.payload or {}
+    tool = payload.get("tool") or event.matcher_target
+    if tool != "shell_exec":
+        return HookDecision.noop()
+    params = payload.get("params") or {}
+    cmd = str(params.get("command") or "").strip()
+    if not cmd:
+        return HookDecision.noop()
+    for pat in _DANGEROUS_SHELL_PATTERNS:
+        if pat.search(cmd):
+            return HookDecision(
+                block=True,
+                block_reason=(
+                    f"命令 {cmd!r} 命中高危规则 {pat.pattern!r}，已阻断。"
+                    "请使用更安全的替代命令。"
+                ),
+            )
+    return HookDecision.noop()
+
+
+def permission_gate(event: HookEvent) -> HookDecision:
+    """PreToolUse 权限闸门（Phase 4C 最小版）。
+
+    依赖 event.meta:
+      - trust_policy: {builtin|verified|untrusted -> allow|audit|ask|deny}
+      - interaction_mode: interactive | non_interactive
+      - non_interactive_fallback: allow | deny
+    """
+    if event.type != "PreToolUse":
+        return HookDecision.noop()
+
+    payload = event.payload or {}
+    tool = str(payload.get("tool") or event.matcher_target or "")
+    trust_level = str(payload.get("trust_level") or "untrusted")
+
+    meta = event.meta or {}
+    trust_policy = dict(meta.get("trust_policy") or {})
+    action = str(trust_policy.get(trust_level) or "allow").lower()
+
+    if action in {"allow", "audit"}:
+        return HookDecision.noop()
+
+    if action == "deny":
+        return HookDecision(
+            block=True,
+            block_reason=f"权限策略拒绝工具 {tool!r}（trust_level={trust_level}，action=deny）。",
+        )
+
+    if action != "ask":
+        return HookDecision(
+            block=True,
+            block_reason=(
+                f"权限策略 action={action!r} 非法，按 deny 处理（tool={tool}, trust={trust_level}）。"
+            ),
+        )
+
+    mode = str(meta.get("interaction_mode") or "non_interactive")
+    if mode != "interactive":
+        fallback = str(meta.get("non_interactive_fallback") or "deny").lower()
+        if fallback == "allow":
+            return HookDecision.noop()
+        return HookDecision(
+            block=True,
+            block_reason=(
+                f"工具 {tool!r} 需要审批（trust_level={trust_level}），"
+                "当前为非交互模式，默认拒绝。"
+            ),
+        )
+
+    try:
+        sys.stdout.write(
+            f"\n[permission_gate] 工具 {tool}（trust={trust_level}）请求执行，允许吗？[y/N]: "
+        )
+        sys.stdout.flush()
+        answer = input().strip().lower()
+    except Exception:
+        answer = ""
+    if answer in {"y", "yes"}:
+        return HookDecision.noop()
+    return HookDecision(
+        block=True,
+        block_reason=f"工具 {tool!r} 未通过人工审批（trust_level={trust_level}）。",
     )

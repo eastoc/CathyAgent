@@ -16,7 +16,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from cathy.hooks import HookEvent  # noqa: E402
 from cathy.hooks.builtin import (  # noqa: E402
     audit_log,
+    block_dangerous_shell_commands,
     block_dangerous_paths,
+    permission_gate,
     strip_secrets,
 )
 from cathy.hooks.events import (  # noqa: E402
@@ -127,6 +129,78 @@ class StripSecretsTests(unittest.TestCase):
     def test_silent_on_wrong_event(self) -> None:
         ev = HookEvent(type=POST_TOOL_USE, payload={"user_input": "sk-XXXXXXXXXXXXXXXXXX"})
         self.assertTrue(strip_secrets(ev).is_noop())
+
+
+class BlockDangerousShellCommandsTests(unittest.TestCase):
+    def test_blocks_sudo(self) -> None:
+        ev = HookEvent(
+            type=PRE_TOOL_USE,
+            matcher_target="shell_exec",
+            payload={"tool": "shell_exec", "params": {"command": "sudo ls"}},
+        )
+        d = block_dangerous_shell_commands(ev)
+        self.assertTrue(d.block)
+        self.assertIn("高危规则", d.block_reason)
+
+    def test_blocks_rm_rf_root(self) -> None:
+        ev = HookEvent(
+            type=PRE_TOOL_USE,
+            matcher_target="shell_exec",
+            payload={"tool": "shell_exec", "params": {"command": "rm -rf /"}},
+        )
+        d = block_dangerous_shell_commands(ev)
+        self.assertTrue(d.block)
+
+    def test_other_tool_passthrough(self) -> None:
+        ev = HookEvent(
+            type=PRE_TOOL_USE,
+            matcher_target="write_file",
+            payload={"tool": "write_file", "params": {"path": "a.txt"}},
+        )
+        self.assertTrue(block_dangerous_shell_commands(ev).is_noop())
+
+
+class PermissionGateTests(unittest.TestCase):
+    def test_allow_builtin(self) -> None:
+        ev = HookEvent(
+            type=PRE_TOOL_USE,
+            matcher_target="get_current_datetime",
+            payload={"tool": "get_current_datetime", "trust_level": "builtin"},
+            meta={
+                "trust_policy": {"builtin": "allow", "verified": "audit", "untrusted": "ask"},
+                "interaction_mode": "non_interactive",
+                "non_interactive_fallback": "deny",
+            },
+        )
+        self.assertTrue(permission_gate(ev).is_noop())
+
+    def test_non_interactive_ask_denied(self) -> None:
+        ev = HookEvent(
+            type=PRE_TOOL_USE,
+            matcher_target="shell_exec",
+            payload={"tool": "shell_exec", "trust_level": "untrusted"},
+            meta={
+                "trust_policy": {"untrusted": "ask"},
+                "interaction_mode": "non_interactive",
+                "non_interactive_fallback": "deny",
+            },
+        )
+        d = permission_gate(ev)
+        self.assertTrue(d.block)
+        self.assertIn("非交互模式", d.block_reason)
+
+    def test_non_interactive_ask_allow(self) -> None:
+        ev = HookEvent(
+            type=PRE_TOOL_USE,
+            matcher_target="shell_exec",
+            payload={"tool": "shell_exec", "trust_level": "untrusted"},
+            meta={
+                "trust_policy": {"untrusted": "ask"},
+                "interaction_mode": "non_interactive",
+                "non_interactive_fallback": "allow",
+            },
+        )
+        self.assertTrue(permission_gate(ev).is_noop())
 
 
 if __name__ == "__main__":

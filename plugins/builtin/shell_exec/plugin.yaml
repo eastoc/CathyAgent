@@ -1,0 +1,46 @@
+name: shell_exec
+version: 0.1.0
+description: 通过可插拔 sandbox 执行 shell 指令（默认本地受限或 seatbelt）。
+
+tools:
+  - name: shell_exec
+    description: >-
+      执行 shell 命令并返回结构化结果（stdout/stderr/exit_code/timed_out/backend）。
+      仅允许在工作空间内运行，默认有超时和输出长度限制。危险命令会被拦截。
+    input_schema:
+      type: object
+      properties:
+        command:
+          type: string
+          description: 要执行的 shell 命令（单行）
+        cwd:
+          type: string
+          description: 可选执行目录（相对工作空间），默认 "."
+          default: "."
+        timeout_sec:
+          type: number
+          description: 可选超时时间（秒），默认使用系统配置
+          minimum: 0.1
+        env_allowlist:
+          type: array
+          description: 允许透传给子进程的环境变量名列表（默认空）
+          items:
+            type: string
+      required: [command]
+      additionalProperties: false
+
+permissions:
+  filesystem: sandbox
+  network: sandbox
+  shell: true
+
+execution:
+  runtime: python
+  entrypoint: main:ShellExecPlugin
+  timeout_seconds: 30
+  sandbox: true
+
+metadata:
+  trust_level: verified
+  tags: [shell, sandbox]
+
