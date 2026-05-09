@@ -3,11 +3,12 @@ __pycache__/
 *.py[codz]
 *$py.class
 
-# CathyAgent 运行时数据
+workspaces/
 data/
+/data/**
 *.db
 *.db-journal
-
+**/.DS_Store
 # C extensions
 *.so
 

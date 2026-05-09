@@ -146,12 +146,49 @@ class PluginRegistry:
         loaded = self._loaded.get(plugin_name)
         return loaded.manifest if loaded else None
 
+    def get_tool_descriptor(self, tool_name: str) -> ToolDescriptor | None:
+        """按 tool_name 查询其来源插件与 trust_level。"""
+        plugin_name = self._tool_index.get(tool_name)
+        if plugin_name is None:
+            return None
+        loaded = self._loaded.get(plugin_name)
+        if loaded is None:
+            return None
+        tool = loaded.tool_index.get(tool_name)
+        if tool is None:
+            return None
+        return ToolDescriptor(
+            name=tool_name,
+            description=tool.description,
+            plugin=plugin_name,
+            trust_level=loaded.manifest.trust_level,
+        )
+
     def shutdown(self) -> None:
         for loaded in self._loaded.values():
             try:
                 loaded.instance.shutdown()
             except Exception as exc:
                 print(f"[plugin][shutdown] {loaded.manifest.name}: {exc}")
+
+    def attach_session(self, session_id: str) -> None:
+        """把运行时 session 上下文广播给支持 attach_session 的插件。
+
+        用途：
+        - shell_exec / file_ops 这类有工作空间隔离需求的插件，可据此切到
+          `workspaces/<session_id>/`。
+        - 不支持该接口的插件会被自动跳过，不影响现有插件生态。
+        """
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        for loaded in self._loaded.values():
+            fn = getattr(loaded.instance, "attach_session", None)
+            if callable(fn):
+                try:
+                    fn(sid)
+                except Exception as exc:
+                    print(f"[plugin][attach_session] {loaded.manifest.name}: {exc}")
 
     # -------- 运行时插件注入（不走磁盘扫描） -------- #
 

@@ -181,30 +181,67 @@
 
 ---
 
-### Phase 4｜沙盒与权限分级（安全底座）
+### Phase 4｜可控执行（先 shell_exec，再 sandbox，再权限策略）
 
-**目标**：让文件写入、shell 执行等危险操作可控。
+**目标**：先把 `shell_exec` 作为一等工具接入，再逐步把文件/命令执行放进可控沙盒；避免“一上来做重隔离”拖慢迭代。
+
+#### Phase 4A｜`shell_exec` 工具先落地（功能闭环）
 
 **做：**
-- **工作空间**：每个 session 一个 `workspaces/<session_id>/`，文件类工具的路径**强制 chroot**（`os.path.realpath` 校验）。
-- 新增 `shell_exec` 工具：`subprocess` + 白名单参数 + 超时；`runtime: docker` 留接口占位但**不真做**。
-- **trust_level 三档**（对齐 Claude Code 的 ask/allow/deny）：
-  | trust_level | 行为 |
+- 新增 `plugins/builtin/shell_exec/`（`plugin.yaml` + `main.py`），工具签名：
+  - 入参：`command`, `cwd?`, `timeout_sec?`, `env_allowlist?`
+  - 出参：`stdout`, `stderr`, `exit_code`, `timed_out`
+- 最小安全栏（非沙盒）：禁 `sudo` / 禁多行命令 / 默认 10s 超时 / 输出长度截断。
+- 与 Phase 3.5 hooks 打通（4A 剩余）：
+  - `PreToolUse`：新增 `block_dangerous_shell_commands`，在 hook 层统一拦截高危命令（`rm -rf /`、fork bomb、提权模式）；插件内 `_validate_command` 保留为兜底。
+  - `PostToolUse`：审计日志补齐 shell 关键字段（`command`, `exit_code`, `timed_out`, `latency_ms`）。
+
+**验收：**
+- Agent 能调用 `shell_exec("python -V")` 并返回结构化结果。
+- 超时命令被终止，返回 `timed_out=true`。
+- 危险命令被 `PreToolUse` hook 拦截并回灌模型自纠（不仅依赖插件内校验）。
+
+#### Phase 4B｜Sandbox 适配层（隔离闭环）
+
+**做：**
+- 抽象 `SandboxExecutor` 接口（`run(cmd, cwd, env, limits) -> result`），`shell_exec`/`file_ops` 均走这层或共享同一 `resolve_in_workspace` 约束。
+- 先实现 `seatbelt`（mac，`py-sandboxrt`）+ `local_restricted`（兜底）两层，保持后端可插拔。
+- 工作空间隔离（本阶段重点）：每个 session 固定 `workspaces/<session_id>/`。
+  - `shell_exec` 的 `cwd` 必须在该目录内；
+  - `file_ops` 的 `root` 必须切到该目录（跨 session 路径直接拒绝）。
+- Session -> Workspace 绑定：在 `cli/main` 拿到 session 后注入 runtime（而不是静态全局 workspace）。
+- 资源限制：超时、输出长度、网络开关（默认关）；进程数/内存上限后置到 4C/后续。
+
+**方案说明（已定）：**
+- 不采用 `nsjail` 路线；当前目标是 mac 本地可用、可插拔扩展。
+- Cursor / Claude Code 同类能力在 CathyAgent 中分层放置：
+  - 4B 做 runtime 隔离（sandbox + workspace）
+  - 4C 做策略治理（permission/audit/ask/deny）
+
+**验收：**
+- 任何 `shell_exec`/`write_file` 越出 `workspaces/<session_id>/` 直接失败。
+- 同一进程创建两个 session，A 会话无法读写 B 会话目录。
+- `SANDBOX.backend` 在 `seatbelt` / `local_restricted` 间可切换，业务层无需改代码。
+
+#### Phase 4C｜权限策略（治理闭环）
+
+**做：**
+- 在 Phase 3.5 hook 之上挂三件套：
+  - `permission_gate`（PreToolUse）：按 `trust_level` 决定 allow/audit/ask/deny
+  - `workspace_guard`（PreToolUse）：二次校验路径与 cwd
+  - `tool_audit`（PostToolUse）：统一 JSONL 审计（命令 + 文件操作）
+- `trust_level` 策略：
+  | trust_level | 默认行为 |
   |---|---|
-  | `builtin` | 直接执行 |
-  | `verified` | 直接执行 + 审计日志 |
-  | `untrusted` | CLI 弹"允许 / 拒绝 / 始终允许"提示 |
-- 在 Phase 3.5 的 hook 系统上注入安全策略 builtin hooks：
-  - `permission_gate`（PreToolUse）：按 `trust_level` 决定 allow / audit / ask（`untrusted` 弹 CLI 提示）
-  - `workspace_chroot`（PreToolUse）：file_ops 类工具路径强制校验在 `workspaces/<session_id>/` 内
-  - `tool_audit`（PostToolUse）：把每次调用写入 `data/audit.jsonl`（与 Phase 3.5 的 `audit_log` 复用同一实现）
+  | `builtin` | allow |
+  | `verified` | allow + audit |
+  | `untrusted` | ask（CLI）或 deny（无交互模式） |
 
-**验收**：
-- 沙盒外路径调用 `write_file` 直接报错。
-- 标记为 `untrusted` 的插件每次调用前都需用户确认。
-- 所有工具调用产出结构化审计日志。
+**验收：**
+- `untrusted` 工具在交互模式必经审批；非交互模式默认 deny。
+- 审计日志可按 `session_id` 还原完整执行链。
 
-**暂缓**：Docker runtime 实际落地、seccomp、出站网络代理。
+**暂缓**：gVisor / Firecracker 微 VM、远程隔离集群、细粒度网络代理策略、Linux 专用高隔离后端。
 
 ---
 
@@ -333,8 +370,10 @@ flowchart LR
   P1 --> P2[Phase 2<br/>多级上下文]
   P2 --> P3[Phase 3<br/>Subagent + Skills]
   P3 --> P35[Phase 3.5<br/>Hooks 中间件]
-  P35 --> P4[Phase 4<br/>沙盒 + 权限]
-  P4 --> P5[Phase 5<br/>Memory + MCP]
+  P35 --> P4A[Phase 4A<br/>shell_exec]
+  P4A --> P4B[Phase 4B<br/>Sandbox 适配层]
+  P4B --> P4C[Phase 4C<br/>权限策略]
+  P4C --> P5[Phase 5<br/>Memory + MCP]
   P5 --> P6[Phase 6<br/>Plan-Execute + 可观测]
   P6 --> P7[Phase 7<br/>iMessage]
   P7 --> P8[Phase 8<br/>TS 网关 + UI]
@@ -343,6 +382,7 @@ flowchart LR
 
 > Phase 9 依赖 Phase 5（MCP 客户端），可与 Phase 6/7/8 并行。
 > Phase 6 的"可观测性"在 Phase 3.5 之后实现量减半（结构化 JSONL 日志直接由 PostToolUse hook 产出）。
+> Phase 4 拆成 4A/4B/4C 后，可以先交付 `shell_exec` 能力，再逐步升级到强隔离与权限治理。
 
 ---
 
@@ -351,6 +391,8 @@ flowchart LR
 - [ ] `ARCHITECTURE.md` 中所有 `Cathy/` 路径同步替换为 `CathyAgent/`。
 - [ ] 决定 `pyproject.toml` 用 `uv` / `poetry` / 纯 `pip + venv` 哪一种。
 - [ ] 决定 LLM 默认模型（`qwen3.5-plus` / `qwen-max` / 其他）以及是否多模型路由（按 role 分工）。
+- [ ] 补齐 4B 会话级 workspace 隔离（`workspaces/<session_id>/`）并让 `file_ops` 与 `shell_exec` 统一约束。
+- [ ] 补齐 4A 剩余：`PreToolUse` 层面的 `block_dangerous_shell_commands` hook。
 - [ ] iMessage 阶段是否需要群聊支持（影响 Router 设计）。
 
 ---
@@ -366,4 +408,4 @@ flowchart LR
 | 中间件 | Hooks 在 Phase 3.5 落地，作为后续安全 / 审计 / 改写的统一入口 |
 | 入口顺序 | CLI（P0）→ iMessage（P7）→ Web UI（P8） |
 | 工具协议 | OpenAI function-calling → Plugin Manifest → MCP |
-| 安全 | trust_level 三档 + sandbox chroot；Docker / seccomp 后置 |
+| 安全路线 | Phase 4A 先上 `shell_exec`，4B 接 sandbox 适配层，4C 再收口权限治理 |

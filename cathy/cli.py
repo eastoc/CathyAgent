@@ -58,10 +58,25 @@ def _on_event(event: str, payload: dict) -> None:
 def _build_plugin_configs(cfg: dict) -> dict[str, dict]:
     tavily_key = cfg.get("TAVILY_API_KEY") or os.environ.get("TAVILY_API_KEY", "")
     has_tavily = bool(tavily_key) and "${" not in str(tavily_key)
+    sandbox_cfg = cfg.get("SANDBOX") or {}
+    workspace_root = Path(sandbox_cfg.get("workspace_root") or "workspaces")
+    if not workspace_root.is_absolute():
+        workspace_root = _PROJECT_ROOT / workspace_root
     return {
         "web_search": {"api_key": tavily_key} if has_tavily else {},
-        "file_ops": {"root": str(Path.cwd())},
+        "file_ops": {
+            "workspace_root": str(workspace_root),
+        },
         "current_datetime": {},
+        "shell_exec": {
+            "backend": str(sandbox_cfg.get("backend") or "local_restricted"),
+            "workspace_root": str(workspace_root),
+            "default_timeout_sec": float(sandbox_cfg.get("default_timeout_sec", 10)),
+            "max_timeout_sec": float(sandbox_cfg.get("max_timeout_sec", 30)),
+            "max_output_bytes": int(sandbox_cfg.get("max_output_bytes", 65536)),
+            "allow_network": bool((sandbox_cfg.get("network") or {}).get("allow", False)),
+            "allowed_domains": list((sandbox_cfg.get("network") or {}).get("allowed_domains") or []),
+        },
     }
 
 
@@ -172,6 +187,7 @@ def build_runtime(cfg: dict | None = None) -> tuple[Agent, SessionStore, HookMan
         config=AgentConfig(max_steps=int(agent_cfg.get("max_steps", 12))),
         on_event=_on_event,
         hooks=hooks,
+        permission_cfg=dict(cfg.get("PERMISSION") or {}),
     )
     return agent, store, hooks
 
@@ -204,6 +220,8 @@ def main() -> None:
 
     session = store.get_or_create(args.session)
     is_new = len(session.messages) == 0
+    # 把会话上下文广播给支持 attach_session 的插件（shell_exec/file_ops 等）。
+    agent.tools.attach_session(session.id)
 
     # === Hook: SessionStart（拿到 session 后立刻派发，可往 system prompt 注入上下文） ===
     if hooks.has_hooks_for(SESSION_START):

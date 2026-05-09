@@ -75,6 +75,7 @@ class Agent:
         config: AgentConfig | None = None,
         on_event: Callable[[str, dict], None] | None = None,
         hooks: HookManager | None = None,
+        permission_cfg: dict[str, Any] | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -83,6 +84,7 @@ class Agent:
         self.config = config or AgentConfig()
         self._on_event = on_event or (lambda _t, _p: None)
         self.hooks = hooks  # None -> 等价于"没装 hook"，零开销
+        self.permission_cfg = permission_cfg or {}
 
     # ---------------- hooks 辅助 ---------------- #
 
@@ -197,11 +199,38 @@ class Agent:
                     args = {}
 
                 # === Hook 2/4: PreToolUse ===
+                desc = None
+                get_desc = getattr(self.tools, "get_tool_descriptor", None)
+                if callable(get_desc):
+                    desc = get_desc(name)
+                trust_level = getattr(desc, "trust_level", "untrusted")
+
+                interaction_mode = "interactive"
+                try:
+                    import sys as _sys
+
+                    interaction_mode = "interactive" if _sys.stdin.isatty() else "non_interactive"
+                except Exception:
+                    interaction_mode = "non_interactive"
+
                 pre_decision = self._dispatch(
                     PRE_TOOL_USE,
                     session_id=session.id,
                     matcher_target=name,
-                    payload={"tool": name, "params": args},
+                    payload={
+                        "tool": name,
+                        "params": args,
+                        "trust_level": trust_level,
+                    },
+                    meta={
+                        "trust_policy": dict(
+                            (self.permission_cfg.get("trust_policy") or {})
+                        ),
+                        "non_interactive_fallback": str(
+                            self.permission_cfg.get("non_interactive_fallback") or "deny"
+                        ),
+                        "interaction_mode": interaction_mode,
+                    },
                 )
                 if pre_decision is not None:
                     if pre_decision.rewrite_params is not None:
