@@ -106,6 +106,70 @@ class HookManagerTests(unittest.TestCase):
             "A",
         )
 
+    def test_matcher_glob_prefix(self) -> None:
+        """matcher 含 `*` 时按 fnmatch glob 匹配（用于 mcp__server__* 等）。"""
+        mgr = HookManager(
+            {
+                PRE_TOOL_USE: [
+                    {
+                        "matcher": "mcp__fs__write_*",
+                        "hooks": [
+                            {"type": "python", "target": "tests.test_hooks_manager:hk_inject_a"}
+                        ],
+                    }
+                ]
+            }
+        )
+        self.assertEqual(
+            mgr.dispatch(
+                HookEvent(type=PRE_TOOL_USE, matcher_target="mcp__fs__write_file")
+            ).inject_context,
+            "A",
+        )
+        self.assertEqual(
+            mgr.dispatch(
+                HookEvent(type=PRE_TOOL_USE, matcher_target="mcp__fs__write_text_file")
+            ).inject_context,
+            "A",
+        )
+        self.assertFalse(
+            mgr.dispatch(
+                HookEvent(type=PRE_TOOL_USE, matcher_target="mcp__fs__read_file")
+            ).inject_context
+        )
+
+    def test_matcher_alternation_with_glob(self) -> None:
+        """每段独立支持 glob：`write_file|mcp__*__write_*`。"""
+        mgr = HookManager(
+            {
+                PRE_TOOL_USE: [
+                    {
+                        "matcher": "write_file|mcp__*__write_*",
+                        "hooks": [
+                            {"type": "python", "target": "tests.test_hooks_manager:hk_inject_a"}
+                        ],
+                    }
+                ]
+            }
+        )
+        self.assertEqual(
+            mgr.dispatch(
+                HookEvent(type=PRE_TOOL_USE, matcher_target="write_file")
+            ).inject_context,
+            "A",
+        )
+        self.assertEqual(
+            mgr.dispatch(
+                HookEvent(type=PRE_TOOL_USE, matcher_target="mcp__fs__write_file")
+            ).inject_context,
+            "A",
+        )
+        self.assertFalse(
+            mgr.dispatch(
+                HookEvent(type=PRE_TOOL_USE, matcher_target="mcp__fs__list_dir")
+            ).inject_context
+        )
+
     def test_chain_concatenates_inject_context(self) -> None:
         mgr = HookManager(
             {

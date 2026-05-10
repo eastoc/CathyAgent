@@ -202,6 +202,78 @@ class PermissionGateTests(unittest.TestCase):
         )
         self.assertTrue(permission_gate(ev).is_noop())
 
+    # ---- mcp_rules 优先级 / glob ----
+
+    def _mcp_event(self, tool: str, mcp_rules: dict) -> HookEvent:
+        return HookEvent(
+            type=PRE_TOOL_USE,
+            matcher_target=tool,
+            payload={"tool": tool, "trust_level": "verified"},
+            meta={
+                "trust_policy": {"verified": "audit"},
+                "mcp_rules": mcp_rules,
+                "interaction_mode": "non_interactive",
+                "non_interactive_fallback": "deny",
+            },
+        )
+
+    def test_mcp_rules_deny_overrides_audit(self) -> None:
+        d = permission_gate(
+            self._mcp_event(
+                "mcp__fs__delete_file",
+                {"deny": ["mcp__fs__delete_*"], "allow": ["mcp__fs__*"]},
+            )
+        )
+        self.assertTrue(d.block)
+        self.assertIn("deny", d.block_reason)
+
+    def test_mcp_rules_ask_in_non_interactive_blocks(self) -> None:
+        d = permission_gate(
+            self._mcp_event(
+                "mcp__fs__write_file",
+                {"ask": ["mcp__fs__write_*"]},
+            )
+        )
+        self.assertTrue(d.block)
+        self.assertIn("非交互模式", d.block_reason)
+
+    def test_mcp_rules_allow_passes(self) -> None:
+        d = permission_gate(
+            self._mcp_event(
+                "mcp__fs__read_file",
+                {"deny": ["mcp__fs__delete_*"], "allow": ["mcp__fs__read_*"]},
+            )
+        )
+        self.assertTrue(d.is_noop())
+
+    def test_mcp_rules_only_apply_to_mcp_prefix(self) -> None:
+        # 内置工具不会被 mcp_rules 误判
+        ev = HookEvent(
+            type=PRE_TOOL_USE,
+            matcher_target="write_file",
+            payload={"tool": "write_file", "trust_level": "builtin"},
+            meta={
+                "trust_policy": {"builtin": "allow"},
+                "mcp_rules": {"deny": ["write_file"]},
+                "interaction_mode": "non_interactive",
+                "non_interactive_fallback": "deny",
+            },
+        )
+        self.assertTrue(permission_gate(ev).is_noop())
+
+    def test_mcp_rules_priority_deny_over_allow(self) -> None:
+        # 同时命中 deny 和 allow 时按 deny → ask → allow 顺序，deny 胜
+        d = permission_gate(
+            self._mcp_event(
+                "mcp__fs__delete_file",
+                {
+                    "deny": ["mcp__fs__delete_*"],
+                    "allow": ["mcp__fs__*"],
+                },
+            )
+        )
+        self.assertTrue(d.block)
+
 
 if __name__ == "__main__":
     unittest.main()

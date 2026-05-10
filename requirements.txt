@@ -4,3 +4,5 @@ tavily-python>=0.7.0
 jsonschema>=4.20.0
 langgraph>=0.2.0
 py-sandboxrt>=0.2.0
+fastmcp>=2.0.0
+mcp-server-time>=2026.1.0

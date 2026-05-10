@@ -16,7 +16,7 @@ pip install -r requirements.txt
 `config/.env` 已包含示例 key（仅本地开发，已被 `.gitignore` 忽略）。如需替换：
 
 ```env
-QWEN_API_KEY=sk-...
+DEEPSEEK_API_KEY=sk-...
 TAVILY_API_KEY=tvly-...
 ```
 
@@ -40,7 +40,7 @@ python -m cathy
 
 退出：`quit` / `exit` / `q` / Ctrl+C。
 
-## 当前能力（Phase 3.5 · Skill + Subagent + Hooks 中间件）
+## 当前能力（Phase 5.1 · MCP + 权限治理）
 
 | 模块 | 状态 |
 |------|------|
@@ -55,7 +55,11 @@ python -m cathy
 | **Subagent**：`planner_executor` 基于 LangGraph 的 plan-execute-replan | ✅ |
 | **ToolView**（白/黑名单视图，限定子 agent 可用工具集） | ✅ |
 | **Hooks 中间件**：8 类事件 + Python/Command 双后端，兼容 `.claude/settings.json` | ✅ |
-| Sandbox / Memory / MCP / iMessage | 见 `ROADMAP.md`，后续 Phase 实现 |
+| **MCP 客户端接入**（FastMCP，stdio/remote，自动注册到 PluginRegistry） | ✅ |
+| **MCP roots 协商**（`file://` 规范化 + filesystem 参数自动推断） | ✅ |
+| **MCP 工具命名**（`mcp__<server>__<tool>`，单 server 回退 `mcp__<tool>`） | ✅ |
+| **MCP 权限治理**（`PERMISSION.mcp_rules`：deny/ask/allow） | ✅ |
+| iMessage / 远端 Linux Agent | 见 `ROADMAP.md`，后续 Phase 实现 |
 
 ## Skill 与 Subagent 是两件事
 
@@ -76,6 +80,46 @@ python -m cathy
 | `current_datetime` | `get_current_datetime` | 系统时间，避免模型幻觉时间 |
 | `skills` | `read_skill` | 按名拉取一份 SKILL.md 全文（progressive disclosure） |
 | `planner_executor` | `planner_executor` | LangGraph 实现的 plan-execute-replan 子 agent |
+| `mcp`（运行时注入） | `mcp__<server>__<tool>` | 外部 MCP 生态工具（FastMCP Client 聚合） |
+
+## MCP 与权限治理（Phase 5.1）
+
+- MCP 启动入口在 `config/config.yaml` 的 `MCP` 段，支持本地 stdio 与远端服务。
+- roots 语义：filesystem server 会请求 client roots，当前实现会把路径规范为 `file://...` URI，避免 `url_parsing` 报错。
+- 工具名统一为 `mcp__<server>__<tool>`，方便按 server 维度写 hook 与权限规则。
+- `HOOKS` 的 matcher 现支持 glob（`* ? []`），可写 `mcp__fs__write_*` 这类策略。
+- `permission_gate` 支持 `PERMISSION.mcp_rules`，优先级为 `deny -> ask -> allow`，仅对 `mcp__*` 生效。
+
+最小配置示例：
+
+```yaml
+MCP:
+  enabled: true
+  mcp_servers:
+    fs:
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+HOOKS:
+  PreToolUse:
+    - hooks:
+        - type: python
+          target: "cathy.hooks.builtin:permission_gate"
+    - matcher: "write_file|mcp__fs__write_*"
+      hooks:
+        - type: python
+          target: "cathy.hooks.builtin:block_dangerous_paths"
+
+PERMISSION:
+  trust_policy:
+    builtin: allow
+    verified: audit
+    untrusted: ask
+  mcp_rules:
+    deny: ["mcp__fs__delete_*"]
+    ask: ["mcp__fs__write_*"]
+    allow: ["mcp__fs__read_*", "mcp__memory__*", "mcp__time__*"]
+```
 
 ## Skill 工作机制
 
@@ -125,12 +169,14 @@ START → planner ──→ executor ──┬─── (plan 仍有步骤) ─�
 | `PreCompact`       | `ContextAssembler._fit_to_budget`   | 仅观测（MVP 不接受改写） |
 | `Notification`     | 任意位置主动调                      | 路由到外部（IM / 邮件） |
 
-### MVP 默认三件套（`HOOKS_PROFILE: mvp`）
+### MVP 默认 hook 组合（`HOOKS_PROFILE: mvp`）
 
 | Hook | 事件 | 作用 |
 |------|------|------|
 | `cathy.hooks.builtin:strip_secrets`        | `UserPromptSubmit` | 用 regex 把 `sk-...` / `ghp_...` / `api_key=...` 等替换为 `[REDACTED]` |
-| `cathy.hooks.builtin:block_dangerous_paths`| `PreToolUse`/`write_file` | 拦截写入 `/etc` / `~/.ssh` / `~/.aws` 等敏感路径 |
+| `cathy.hooks.builtin:permission_gate`      | `PreToolUse` | 按 `trust_policy` + `mcp_rules` 执行 allow/audit/ask/deny |
+| `cathy.hooks.builtin:block_dangerous_paths`| `PreToolUse`/`write_file|mcp__fs__write_*` | 拦截写入 `/etc` / `~/.ssh` / `~/.aws` 等敏感路径 |
+| `cathy.hooks.builtin:block_dangerous_shell_commands`| `PreToolUse`/`shell_exec|mcp__*__exec_*` | 拦截 `rm -rf /` / `sudo` / fork bomb 等高危命令 |
 | `cathy.hooks.builtin:audit_log`            | `PostToolUse` | 每次 tool call 写一行到 `data/audit.jsonl` |
 
 ### 自定义 hook（两种方式）
@@ -206,6 +252,10 @@ CathyAgent/
       runners.py              # PythonRunner + CommandRunner
       manager.py              # HookManager：matcher / 串联 / .claude 兼容
       builtin.py              # audit_log / block_dangerous_paths / strip_secrets
+    mcp/                      # 【新 Phase 5】MCP 客户端聚合层
+      client.py               # McpHub（FastMCP Client 后台 loop，同步桥接）
+      plugin.py               # McpToolPlugin + build_mcp_manifest
+      __init__.py
   plugins/
     builtin/                  # web_search / file_ops / current_datetime
     community/                # 用户插件

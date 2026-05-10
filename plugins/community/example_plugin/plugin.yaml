@@ -1,0 +1,28 @@
+name: example_plugin
+version: 0.1.0
+description: 社区插件示例：演示最小可用的 plugin.yaml + main.py 形态。
+
+tools:
+  - name: example_ping
+    description: >-
+      演示用占位工具。调用后返回固定文案，用于验证插件加载与执行链路。
+    input_schema:
+      type: object
+      properties: {}
+      required: []
+      additionalProperties: false
+
+permissions:
+  network: none
+  filesystem: none
+  shell: false
+
+execution:
+  runtime: python
+  entrypoint: main:ExamplePlugin
+  timeout_seconds: 5
+  sandbox: false
+
+metadata:
+  trust_level: untrusted
+  tags: [example]
