@@ -111,7 +111,8 @@ flowchart TB
 |------|-----------|------|
 | **工作记忆** | Redis 或 SQLite：最近 N 轮 + 当前任务状态 | 对话连贯 |
 | **会话摘要** | 异步压缩旧对话 | 控制 token |
-| **长期记忆（可选）** | SQLite + sqlite-vec / Chroma / LanceDB | 偏好、事实、技能使用记录 |
+| **项目规则** | `AGENTS.md` / `CATHY.md` 文件，启动时由 `ContextAssembler` 注入 PROJECT 层 | 偏好、风格、执行约束 |
+| **长期记忆（后置）** | 暂不做（向量库 / 事实记忆推迟到后续 Phase） | 跨会话事实知识 |
 
 密钥、机器人策略、允许联系人等应落在 **配置与数据库**，勿依赖模型「口头记住」。
 
@@ -140,7 +141,8 @@ flowchart TB
 
 | 类型 | 运行位置 | 示例 | 说明 |
 |------|----------|------|------|
-| **内置插件** | 本进程 | `web_search`、`file_ops`、`shell_exec`、`memory_query` | 随系统发布，享有较高信任等级。 |
+| **内置插件** | 本进程 | `web_search`、`file_ops`、`shell_exec`、`current_datetime` | 随系统发布，享有较高信任等级。 |
+| **MCP 客户端** | 本进程聚合多个 MCP server | `mcp__*`（来自任意 MCP server） | 复用 `fastmcp.Client`，同 `mcpServers` 配置即可接入。 |
 | **本地插件** | 子进程 / Docker | 用户自定义脚本、数据分析工具 | 从 `plugins/` 目录发现，在沙盒中执行。 |
 | **MCP 远程插件** | 网络进程 | Linux 机器人能力、第三方 SaaS | 通过 MCP/WebSocket/gRPC 远程调用。 |
 | **Skill 插件** | 本进程 | `skills/<name>/` | Skill = Prompt 模板 + 可选工具组合，本质也是一种插件。 |
@@ -274,7 +276,7 @@ class ToolPlugin(ABC):
 | `web_search` | `search` | network: 搜索域名 | 网络搜索 + 摘要 + 引用 URL |
 | `file_ops` | `read_file`, `write_file`, `list_dir` | filesystem: sandbox only | 沙盒内文件操作 |
 | `shell_exec` | `run_command` | shell: true, filesystem: sandbox | 沙盒内执行命令 |
-| `memory` | `query_memory`, `save_memory` | internal | 长期记忆读写 |
+| `mcp` | 动态：从已连接 MCP server 的 `tools/list` 取得，统一加 `mcp__` 前缀 | 视具体 MCP server 而定 | 通过 `fastmcp.Client` 聚合多个 MCP server，启动时发现，运行期 `tools/call` 转发 |
 | `robot_remote` | 动态：从 `ListCapabilities` 获取 | network: robot endpoint | MCP 远程插件，代理 Linux 机器人 |
 
 ### 7.8 安全模型

@@ -245,23 +245,83 @@
 
 ---
 
-### Phase 5｜Memory & MCP（长期能力 + 外部生态）
+### Phase 5｜MCP（外部生态）
 
-**目标**：补齐长期记忆，打通 MCP 生态。
+**目标**：打通 MCP 生态。规则层沿用 Phase 2 的 `AGENTS.md` / `CATHY.md` 项目规则，不另起独立 rule memory 体系。
 
 **做：**
-- **Memory 插件**：
-  - `query_memory` / `save_memory` 两个工具。
-  - 存储：SQLite + `sqlite-vec`（最轻量，无需独立向量服务）。
-  - 触发策略：写入由模型自行决定；查询由 ContextAssembler 在 Phase 2 的 Session 层之上注入相关记忆。
-- **MCP 客户端**：
-  - 实现 `McpToolPlugin` 基类（`ARCHITECTURE.md §7.5` 已设计）。
-  - `config.yaml` 新增 `mcp_servers:` 段，启动时拉起 stdio / SSE 任选其一先做。
-  - `tools/list` 自动映射为本地 tool，`tools/call` 映射为 `execute()`。
+- **项目规则**（已具备，无需新增模块）：
+  - 用户在项目根维护 `AGENTS.md` 或 `CATHY.md`，由 `ContextAssembler` 自动作为 PROJECT 层注入 system prompt。
+  - 如需个人级规则，把指令写进 `AGENT.extra_system` 或项目 `AGENTS.md`。
+- **MCP 客户端**（已实现）：
+  - 复用官方 SDK：`fastmcp.Client`（构筑在 `mcp` 官方 Python SDK 之上）。
+  - `config.yaml` 新增 `MCP.mcp_servers` 段，结构与 Claude Code 的 `mcpServers` 同构（local stdio：`command/args/env`；remote：`url/headers`）。
+  - 实现 `cathy/mcp/`：
+    - `McpHub`：后台守护线程承载 asyncio loop；`async with Client(...)` 持长连接；同步方法走 `run_coroutine_threadsafe`。
+    - `McpToolPlugin` + `build_mcp_manifest`：把 `tools/list` 映射为带 `mcp__` 前缀的 OpenAI tool schema，注册进 `PluginRegistry`。
+    - 优雅降级：`fastmcp` 未安装或启动失败时仅 print 日志，不阻断主流程。
 
 **验收**：
-- 用户告知"我喜欢简洁回答"，下一会话仍生效。
-- `config.yaml` 加一个公开 MCP server，agent 自动多出几个工具且可调用。
+- 在 `AGENTS.md` 写下"回答必须用中文"，新会话立即遵守（Phase 2 已通过，本阶段保持）。
+- `config.yaml` 配一个 MCP server，启动后 `[mcp] connected servers=...` 日志可见，工具列表里出现 `mcp__*`，agent 能调用成功（in-memory FastMCP server 集成测试已覆盖）。
+
+#### Phase 5.1｜MCP 安全姿势对齐 CC / Cursor（已完成）
+
+> 背景：Phase 5 主线只把 MCP 接入了，trust 走 `verified=audit`，等于"只记录、不拦截"；
+> 而内置 hook 的 matcher 又只对 `write_file` / `shell_exec` 这种字面量生效，`mcp__*`
+> 工具实际**绕过**了 Phase 4C 的策略治理。本子阶段把 MCP 工具纳入既有权限/Hook 链路，
+> 形态对齐 Claude Code（`mcp__<server>__<tool>` + `permissions` allow/ask/deny）与
+> Cursor（`mcpAllowlist`）。
+
+**做：**
+- **命名规则**：MCP 工具名由 `mcp__<tool>` 升级为 **`mcp__<server>__<tool>`**；
+  - `cathy/mcp/client.py` 新增 `build_outer_tool_name(inner, server_names)`，
+    最长 server 前缀优先匹配；单 server / in-memory 测试场景退化为旧形态。
+  - `McpHub` 新增 `server_names` 参数；`cli.py` 注入 `mcp_servers.keys()` 列表。
+  - `McpToolInfo` 新增 `server_name` 字段，便于审计。
+- **Hook matcher 支持 glob**：`cathy/hooks/manager.py` 在原"字面量 / `|` 多段"基础上，
+  含 `* ? [ ]` 时走 `fnmatch.fnmatchcase`；`|` 多段每段独立 glob。这样配置可写
+  `matcher: "write_file|mcp__fs__write_*"`，把 MCP 工具一并纳入既有保护 hook。
+- **`permission_gate` 引入 `mcp_rules`**：`cathy/hooks/builtin.py` 新增
+  `_match_mcp_rules(tool, mcp_rules)`，按 **deny → ask → allow** 顺序匹配，仅对
+  `mcp__*` 前缀生效，命中后**覆盖** trust_policy 的 action（语义对齐 CC `permissions`
+  / Cursor `mcpAllowlist`）。
+- **`agent.py` 透传**：PreToolUse 派发的 `meta` 增加 `mcp_rules` 字段。
+- **配置示例**（`config/config.yaml`）：
+  - `HOOKS.PreToolUse` matcher 用 glob 扩展，复用已有的 `block_dangerous_paths` /
+    `block_dangerous_shell_commands` 拦截 MCP 同类工具。
+  - `PERMISSION` 段新增 `mcp_rules`：默认 `mcp__fs__delete_*` / `mcp__fs__move_*` deny，
+    `mcp__fs__write_*` / `mcp__fs__edit_*` ask，`mcp__fs__read_*` / `mcp__memory__*` /
+    `mcp__time__*` allow。
+
+**验收**（已通过）：
+- `tests/test_mcp_hub.py` 新增 `BuildOuterToolNameTest` 5 case：带前缀 / 最长前缀
+  / 无 server fallback / 无 server names 兼容 / 数字开头补 `t_`。
+- `tests/test_hooks_manager.py` 新增 `test_matcher_glob_prefix` 与
+  `test_matcher_alternation_with_glob`，验证 `mcp__fs__write_*` 等 glob 正常命中。
+- `tests/test_hooks_builtin.py` `PermissionGateTests` 新增 5 case：
+  deny 覆盖 audit、ask 非交互拦截、allow 通过、不影响 builtin、deny 优先级高于 allow。
+- 现有 14 个新增/修改 case 全部通过；旧测试无 regression（langgraph 缺失导致的
+  2 个 ERROR 与本次改动无关）。
+
+**对照 CC / Cursor**：
+| 维度 | Claude Code | Cursor | CathyAgent（本阶段） |
+|---|---|---|---|
+| 工具命名 | `mcp__<server>__<tool>` | `<server>:<tool>` | `mcp__<server>__<tool>` |
+| 规则形式 | `permissions: {allow/ask/deny}` | `mcpAllowlist: ["<server>:<tool>"]` | `PERMISSION.mcp_rules: {deny/ask/allow}` |
+| 优先级 | deny → ask → allow | allowlist 命中即放行 | deny → ask → allow（覆盖 trust_policy） |
+| Glob | `mcp__server__*` 等 | `server:*` / glob | fnmatch glob，hook matcher / mcp_rules 同款 |
+| 进程隔离 | 无 | 无（`sandbox.json` 仅管 terminal） | 无（与上述两家持平；Seatbelt 仍只覆盖内置工具） |
+
+**暂缓 / 后续（5.2+）**：
+- **MCP 子进程沙盒化**：把 `mcp_servers.<name>.command` 默认包一层 `sandbox-exec`，
+  让 server 本身只能访问 `roots`（与本阶段权限治理形成纵深防御）。
+- **mcpServers 变更检测**：启动时对配置段做 hash，发生变化要求显式 `--accept-mcp-changes`
+  才继续（对齐 Cursor MCPoison/CVE-2025-54136 修复）。
+- **env 白名单透传**：`mcp_servers.<name>.env` 默认收敛为白名单，避免子进程读到
+  `DEEPSEEK_API_KEY` / `~/.aws/credentials` 等。
+- **roots 与 workspace 对齐**：默认从 `SANDBOX.workspace_root` 派生 roots，让 MCP 看到
+  的根目录与内置工具一致，避免出现 `/tmp` 这种"宽于 workspace"的 root。
 
 ---
 
@@ -374,7 +434,8 @@ flowchart LR
   P4A --> P4B[Phase 4B<br/>Sandbox 适配层]
   P4B --> P4C[Phase 4C<br/>权限策略]
   P4C --> P5[Phase 5<br/>Memory + MCP]
-  P5 --> P6[Phase 6<br/>Plan-Execute + 可观测]
+  P5 --> P51[Phase 5.1<br/>MCP 安全姿势]
+  P51 --> P6[Phase 6<br/>Plan-Execute + 可观测]
   P6 --> P7[Phase 7<br/>iMessage]
   P7 --> P8[Phase 8<br/>TS 网关 + UI]
   P5 --> P9[Phase 9<br/>Linux 远程 Agent]
@@ -393,6 +454,9 @@ flowchart LR
 - [ ] 决定 LLM 默认模型（`qwen3.5-plus` / `qwen-max` / 其他）以及是否多模型路由（按 role 分工）。
 - [ ] 补齐 4B 会话级 workspace 隔离（`workspaces/<session_id>/`）并让 `file_ops` 与 `shell_exec` 统一约束。
 - [ ] 补齐 4A 剩余：`PreToolUse` 层面的 `block_dangerous_shell_commands` hook。
+- [ ] **Phase 5.2**：MCP 子进程沙盒化（`sandbox-exec` 包裹 stdio server）。
+- [ ] **Phase 5.3**：mcpServers 配置 hash 变更检测 + 重新确认（对齐 Cursor MCPoison 修复）。
+- [ ] **Phase 5.4**：MCP env 白名单透传 + roots 默认绑到 `SANDBOX.workspace_root`。
 - [ ] iMessage 阶段是否需要群聊支持（影响 Router 设计）。
 
 ---

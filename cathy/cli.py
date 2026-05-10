@@ -19,7 +19,16 @@ from .agent import Agent, AgentConfig  # noqa: E402
 from .context import ContextAssembler  # noqa: E402
 from .hooks import HookEvent, HookManager, SESSION_START  # noqa: E402
 from .llm import LLMClient  # noqa: E402
-from .plugins import PluginRegistry  # noqa: E402
+from .mcp import (  # noqa: E402
+    HAS_FASTMCP,
+    McpError,
+    McpHub,
+    McpToolPlugin,
+    build_mcp_manifest,
+    infer_mcp_client_roots_from_servers,
+    normalize_root_uri,
+)
+from .plugins import PluginError, PluginRegistry  # noqa: E402
 from .session.store import SessionStore  # noqa: E402
 from .plugins.registry import ToolView  # noqa: E402
 from .skills import (  # noqa: E402
@@ -94,6 +103,66 @@ def _hook_log(entry: dict) -> None:
     print(f"[hook][{entry.get('phase', '?')}] {entry}")
 
 
+def _resolve_mcp_client_roots(
+    mcp_cfg: dict[str, Any],
+    servers: dict[str, Any],
+) -> list[str] | None:
+    """FastMCP Client 的 roots：配置项 `MCP.roots` 优先，否则从 filesystem stdio 推断。
+
+    所有 root 都会被规范化为 `file://...` URI，避免 FastMCP/pydantic 的 url_parsing 报错。
+    """
+    if "roots" in mcp_cfg:
+        raw = mcp_cfg["roots"]
+        if raw is None:
+            return None
+        if isinstance(raw, list):
+            normalized = [normalize_root_uri(str(x)) for x in raw]
+            return [r for r in normalized if r]
+        return None
+    inferred = infer_mcp_client_roots_from_servers(servers)
+    return inferred if inferred else None
+
+
+def _maybe_register_mcp(cfg: dict[str, Any], registry: PluginRegistry) -> None:
+    """按 cfg.MCP 启动 McpHub 并注册 mcp 插件；任意失败都不应阻断主流程。"""
+    mcp_cfg = cfg.get("MCP") or {}
+    if not bool(mcp_cfg.get("enabled", False)):
+        return
+    servers = mcp_cfg.get("mcp_servers") or {}
+    if not servers:
+        print("[mcp] enabled=true 但未配置 mcp_servers，跳过")
+        return
+    if not HAS_FASTMCP:
+        print("[mcp] 未安装 fastmcp，跳过；如需启用请 `pip install fastmcp`")
+        return
+
+    hub = McpHub(
+        {"mcpServers": dict(servers)},
+        connect_timeout=float(mcp_cfg.get("connect_timeout_sec", 60)),
+        default_call_timeout=float(mcp_cfg.get("call_timeout_sec", 120)),
+        roots=_resolve_mcp_client_roots(mcp_cfg, servers),
+        server_names=list(servers.keys()),
+    )
+    try:
+        hub.start()
+    except McpError as exc:
+        print(f"[mcp] 启动失败，跳过: {exc}")
+        return
+
+    try:
+        manifest = build_mcp_manifest(hub, project_root=_PROJECT_ROOT)
+    except PluginError as exc:
+        print(f"[mcp] {exc}")
+        hub.shutdown()
+        return
+
+    registry.register_internal_plugin(
+        manifest, McpToolPlugin(hub), skip_initialize=True,
+    )
+    tool_names = sorted(t.outer_name for t in hub.list_tools())
+    print(f"[mcp] connected servers={list(servers.keys())} tools={tool_names}")
+
+
 def _select_hooks_config(cfg: dict[str, Any]) -> tuple[dict[str, Any], str]:
     """按 HOOKS_PROFILE 选择生效 hooks。
 
@@ -154,6 +223,10 @@ def build_runtime(cfg: dict | None = None) -> tuple[Agent, SessionStore, HookMan
     skills_plugin = SkillsPlugin(skills=skills)
     registry.register_internal_plugin(build_skills_manifest(), skills_plugin)
     print(f"[skills] loaded: {sorted(s.name for s in skills)}")
+
+    # ---- MCP（Phase 5：外部工具生态） ----
+    # 注意：先于 subagent 注册，子 agent 内部也能用 mcp 工具。
+    _maybe_register_mcp(cfg, registry)
 
     # ---- Subagent：planner_executor（LangGraph） ----
     # 子 agent 内部能用：除 planner_executor 自身以外的所有工具（含 read_skill）。

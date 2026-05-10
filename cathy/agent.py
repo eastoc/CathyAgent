@@ -226,6 +226,9 @@ class Agent:
                         "trust_policy": dict(
                             (self.permission_cfg.get("trust_policy") or {})
                         ),
+                        "mcp_rules": dict(
+                            (self.permission_cfg.get("mcp_rules") or {})
+                        ),
                         "non_interactive_fallback": str(
                             self.permission_cfg.get("non_interactive_fallback") or "deny"
                         ),

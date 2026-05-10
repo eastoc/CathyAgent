@@ -21,7 +21,8 @@ HOOKS:
 
 matcher 语义（保持简单，不引入正则；够用即可）：
 - 缺省 / "*" / ""  -> 任意工具/对象
-- 含 "|" 的字符串 -> split 成多段，**任一段** == matcher_target 即命中
+- 含 "|" 的字符串 -> split 成多段，**任一段**命中即可（每段独立支持 glob）
+- 含 "*"/"?"/"[]" 的字符串 -> 走 fnmatch glob 匹配（例如 `mcp__fs__*`）
 - 其它字符串       -> 整串 == matcher_target 即命中
 
 manager.dispatch(event) 的语义：
@@ -33,6 +34,7 @@ manager.dispatch(event) 的语义：
 
 from __future__ import annotations
 
+import fnmatch
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,6 +50,15 @@ from .runners import (
 )
 
 
+def _matcher_hit(pattern: str, target: str) -> bool:
+    """单个 matcher 与 target 的匹配；含通配符走 fnmatch，否则字面量。"""
+    if not pattern:
+        return False
+    if any(ch in pattern for ch in ("*", "?", "[")):
+        return fnmatch.fnmatchcase(target or "", pattern)
+    return target == pattern
+
+
 @dataclass
 class _MatcherGroup:
     matcher: str  # 已规范化：'*' 表示任意；其它含字面量或 'A|B|C'
@@ -59,8 +70,14 @@ class _MatcherGroup:
         if m == "*" or m == "":
             return True
         if "|" in m:
-            return target in {s for s in m.split("|") if s}
-        return target == m
+            for piece in m.split("|"):
+                piece = piece.strip()
+                if not piece:
+                    continue
+                if _matcher_hit(piece, target):
+                    return True
+            return False
+        return _matcher_hit(m, target)
 
 
 class HookManager:

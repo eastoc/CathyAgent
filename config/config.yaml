@@ -21,7 +21,49 @@ AGENT:
 
 SESSION:
   db_path: data/sessions.db
-  token_budget: 16000      # 历史消息硬截断的 token 预算（字符数/4 估算）
+  token_budget: 200000      # 历史消息硬截断的 token 预算（字符数/4 估算）
+
+# MCP（Model Context Protocol）外部工具生态：
+# - 形态对齐 Claude Code 的 mcpServers：本地 stdio 用 command/args/env；
+#   远端用 url/headers，传输由 fastmcp 根据入参自动推断。
+# - enabled=false 时整段忽略；fastmcp 未安装时自动跳过并打日志。
+# - 工具名按 `mcp__<server>__<tool>` 注册到 PluginRegistry（与 Claude Code 同款）；
+#   单 server / in-memory 测试场景退化为 `mcp__<tool>`。
+# - Time MCP：官方实现为 Python 包 `mcp-server-time`（npm 上 **没有**
+#   `@modelcontextprotocol/server-time`，用 npx 会 404）；见下方 `time` 段。
+MCP:
+  enabled: true
+  connect_timeout_sec: 60      # 启动期连接 + tools/list 的总超时
+  call_timeout_sec: 120        # 单次工具调用超时
+  # 可选：FastMCP Client 暴露给 MCP 服务的 roots（filesystem 会回调 list_roots）。
+  # 省略时自动从各 server 的 `@modelcontextprotocol/server-filesystem` 命令行路径推断。
+  # roots:
+  #   - /tmp
+  #   - file:///Users/me/project
+  mcp_servers:
+    fs:
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+      env: {}
+    memory:
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-memory"]
+      env: {}
+    # 需 `pip install mcp-server-time`（已写入 requirements.txt）
+    time:
+      command: python
+      args: ["-m", "mcp_server_time"]
+      env: {}
+  # 示例：
+  # mcp_servers:
+  #   fs:
+  #     command: npx
+  #     args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+  #     env: {}
+  #   remote:
+  #     url: "https://mcp.example.com/mcp"
+  #     headers:
+  #       Authorization: "Bearer ${SOME_TOKEN}"
 
 # hooks 配置档位：
 # - mvp  (默认): 仅启用 UserPromptSubmit / PreToolUse / PostToolUse
@@ -36,14 +78,15 @@ HOOKS_PROFILE: mvp
 #   plugins/community/<name>/hooks.py  + 在此引用 'cathy.hooks.builtin' 同款形态。
 HOOKS:
   PreToolUse:
-    - hooks:                       # 全工具权限闸门（按 trust_level）
+    - hooks:                       # 全工具权限闸门（按 trust_level + PERMISSION.mcp_rules）
         - type: python
           target: "cathy.hooks.builtin:permission_gate"
-    - matcher: "write_file"
+    # matcher 支持 glob，例如 "mcp__fs__write_*"、"mcp__*__delete_*"。
+    - matcher: "write_file|mcp__fs__write_*|mcp__*__write_*"
       hooks:
         - type: python
           target: "cathy.hooks.builtin:block_dangerous_paths"
-    - matcher: "shell_exec"
+    - matcher: "shell_exec|mcp__*__shell|mcp__*__exec_*"
       hooks:
         - type: python
           target: "cathy.hooks.builtin:block_dangerous_shell_commands"
@@ -76,3 +119,22 @@ PERMISSION:
     untrusted: ask
   # 在脚本/服务等无 TTY 环境，ask 无法交互时的降级策略
   non_interactive_fallback: deny
+
+  # mcp_rules：仅对 `mcp__*` 工具生效，按 deny → ask → allow 的优先级匹配，
+  # 命中后直接覆盖 trust_policy 的判定（语义对齐 Claude Code `permissions` /
+  # Cursor `mcpAllowlist`）。每条 pattern 走 fnmatch glob：
+  #   * 任意字符串、? 任意单字符、[abc] 字符类。
+  mcp_rules:
+    deny:
+      - "mcp__fs__delete_*"
+      - "mcp__fs__move_*"
+    ask:
+      - "mcp__fs__write_*"
+      - "mcp__fs__edit_*"
+    allow:
+      - "mcp__fs__read_*"
+      - "mcp__fs__list_*"
+      - "mcp__fs__search_*"
+      - "mcp__fs__directory_tree"
+      - "mcp__memory__*"
+      - "mcp__time__*"

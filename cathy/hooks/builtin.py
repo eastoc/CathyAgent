@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -215,11 +216,34 @@ def block_dangerous_shell_commands(event: HookEvent) -> HookDecision:
     return HookDecision.noop()
 
 
+def _match_mcp_rules(tool: str, mcp_rules: dict[str, Any]) -> str | None:
+    """按 deny → ask → allow 的优先级匹配工具名 glob 规则。
+
+    返回命中的 action（deny/ask/allow）或 None；mcp_rules 形如：
+        {"deny": ["mcp__fs__delete_*"],
+         "ask":  ["mcp__fs__write_*"],
+         "allow": ["mcp__memory__*"]}
+    匹配只对 `mcp__` 前缀的工具生效，避免误伤内置工具。
+    """
+    if not tool or not tool.startswith("mcp__") or not isinstance(mcp_rules, dict):
+        return None
+    for action in ("deny", "ask", "allow"):
+        patterns = mcp_rules.get(action) or []
+        if not isinstance(patterns, (list, tuple)):
+            continue
+        for pat in patterns:
+            if isinstance(pat, str) and fnmatch.fnmatchcase(tool, pat):
+                return action
+    return None
+
+
 def permission_gate(event: HookEvent) -> HookDecision:
-    """PreToolUse 权限闸门（Phase 4C 最小版）。
+    """PreToolUse 权限闸门（Phase 4C+）。
 
     依赖 event.meta:
       - trust_policy: {builtin|verified|untrusted -> allow|audit|ask|deny}
+      - mcp_rules: 可选，{deny|ask|allow: [glob,...]}，仅对 `mcp__*` 工具生效，
+                   命中后**覆盖** trust_policy 的判定（CC `permissions` 同款语义）。
       - interaction_mode: interactive | non_interactive
       - non_interactive_fallback: allow | deny
     """
@@ -233,6 +257,11 @@ def permission_gate(event: HookEvent) -> HookDecision:
     meta = event.meta or {}
     trust_policy = dict(meta.get("trust_policy") or {})
     action = str(trust_policy.get(trust_level) or "allow").lower()
+
+    # mcp_rules 优先级最高（CC/Cursor 同款 deny→ask→allow），命中即覆盖 trust_policy。
+    rule_hit = _match_mcp_rules(tool, dict(meta.get("mcp_rules") or {}))
+    if rule_hit is not None:
+        action = rule_hit
 
     if action in {"allow", "audit"}:
         return HookDecision.noop()
