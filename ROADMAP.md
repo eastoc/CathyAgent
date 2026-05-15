@@ -377,20 +377,6 @@
 
 ---
 
-### Phase 9｜Linux 远程 Agent
-
-**目标**：打通机器人侧。
-
-**做：**
-- Linux 侧用 Python 起一个 **MCP server**（不另造协议）。
-- 暴露白名单 capabilities：`move_to`、`capture_image`、`run_safe_script`。
-- Mac 侧通过 Phase 5 的 MCP 客户端连接，能力自动出现在 `list_tools()` 中。
-- TLS 1.3 + 设备证书 / 预共享 Token。
-
-**验收**：从 iMessage 或 UI 发"让机器人前进 1 米并拍一张照"，端到端完成。
-
----
-
 ## 2. Phase 0 当天可执行清单
 
 如果今天就要开干，**只做下面 5 步**，跑通即收工：
@@ -438,7 +424,6 @@ flowchart LR
   P51 --> P6[Phase 6<br/>Plan-Execute + 可观测]
   P6 --> P7[Phase 7<br/>iMessage]
   P7 --> P8[Phase 8<br/>TS 网关 + UI]
-  P5 --> P9[Phase 9<br/>Linux 远程 Agent]
 ```
 
 > Phase 9 依赖 Phase 5（MCP 客户端），可与 Phase 6/7/8 并行。

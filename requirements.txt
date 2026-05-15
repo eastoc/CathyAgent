@@ -6,3 +6,8 @@ langgraph>=0.2.0
 py-sandboxrt>=0.2.0
 fastmcp>=2.0.0
 mcp-server-time>=2026.1.0
+
+# === Optional · CAD skill（headless build123d）===
+# 启用 skills/cad/ 时再装；首装约 250 MB（含 cadquery-ocp = OpenCascade wheels）。
+# 如不做 CAD，可注释掉以下行：
+build123d>=0.6.0

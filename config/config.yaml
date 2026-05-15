@@ -54,6 +54,17 @@ MCP:
       command: python
       args: ["-m", "mcp_server_time"]
       env: {}
+    # FreeCAD 需先做：
+    #   1) 把 https://github.com/neka-nat/freecad-mcp 的 `addon/FreeCADMCP`
+    #      复制到 ~/Library/Application Support/FreeCAD/v1-1/Mod/ （macOS FreeCAD 1.1）。
+    #   2) 启动 FreeCAD → 切到 “MCP Addon” 工作台 → 点击 “Start RPC Server”
+    #      （可勾 Auto-Start Server 永久生效）。
+    # 提示：加 `--only-text-feedback` 可让 freecad-mcp 不回传截图，省 token；
+    # 想要 LLM 看 3D 视图截图时去掉这个参数。
+    freecad:
+      command: uvx
+      args: ["freecad-mcp", "--only-text-feedback"]
+      env: {}
   # 示例：
   # mcp_servers:
   #   fs:
@@ -128,9 +139,17 @@ PERMISSION:
     deny:
       - "mcp__fs__delete_*"
       - "mcp__fs__move_*"
+      # FreeCAD：默认禁止任意代码执行；要用时显式改为 ask 并人工确认。
     ask:
       - "mcp__fs__write_*"
       - "mcp__fs__edit_*"
+      # FreeCAD：写类 / 删除 / 仿真等副作用动作需要人工确认。
+      - "mcp__freecad__create_*"
+      - "mcp__freecad__edit_*"
+      - "mcp__freecad__delete_*"
+      - "mcp__freecad__insert_*"
+      - "mcp__freecad__run_fem_*"
+      - "mcp__freecad__execute_code"
     allow:
       - "mcp__fs__read_*"
       - "mcp__fs__list_*"
@@ -138,3 +157,36 @@ PERMISSION:
       - "mcp__fs__directory_tree"
       - "mcp__memory__*"
       - "mcp__time__*"
+      # FreeCAD：只读类工具直接放行，便于模型探查文档/对象/视图。
+      - "mcp__freecad__get_*"
+
+# CAD Agent 产品层配置（见 ROADMAP_CAD_AGENT_v0.5.md §3.4）。
+# - default_project_root 仅是兜底；CLI / SDK 入参（--project / Project.open(root)）优先。
+# - freecad.backend 决定 cathy/cad/adapters/ 走哪条路；P1 之前可保持 freecad_mcp 占位。
+# - library.*_catalog 路径相对仓库根；P3 落地后会真实指向文件。
+# - qa.max_rounds 默认 3，对应 v0.5 §5.4 决策树。
+# - permissions.stage_aware 与 PERMISSION.mcp_rules 互补：前者按 Stage 切换危险动作的 allow/ask/deny。
+CAD_AGENT:
+  enabled: true
+  default_project_root: ~/cad_projects
+  freecad:
+    backend: freecad_mcp        # freecad_mcp | freecad_cmd | mock
+    version_lock: "1.1"
+  library:
+    standard_catalog: cathy/cad/library/gb_catalog.yaml
+    motor_catalog: cathy/cad/library/motor_catalog.yaml
+    reducer_catalog: cathy/cad/library/reducer_catalog.yaml
+    bearing_catalog: cathy/cad/library/bearing_catalog.yaml
+  qa:
+    max_rounds: 3
+    auto_trigger_after:
+      - summarize_part
+      - summarize_assembly
+    feedback_dir_name: qa_history
+  permissions:
+    allow_execute_code: ask
+    stage_aware:
+      S1: { mcp__freecad__execute_code: deny }
+      S2: { mcp__freecad__execute_code: deny }
+      S3: { mcp__freecad__execute_code: ask }
+      S4: { mcp__freecad__execute_code: ask }
