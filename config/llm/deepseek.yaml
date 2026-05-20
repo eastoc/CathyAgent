@@ -1,0 +1,4 @@
+type: openai_compatible
+api_key: ${DEEPSEEK_API_KEY}
+api_base: https://api.deepseek.com
+model: deepseek-v4-pro
