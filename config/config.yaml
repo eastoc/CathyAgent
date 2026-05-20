@@ -1,19 +1,16 @@
-LLM_API:
-  - name: deepseek
-    type: openai_compatible
-    api_key: ${DEEPSEEK_API_KEY}
-    api_base: https://api.deepseek.com
-    model: deepseek-v4-pro
-    temperature: 0.7
-    max_tokens: 4096
-    roles:
-      - planner
-      - executor
+# LLM：provider + 通用推理参数；各供应商连接信息见 config/llm/<name>.yaml
+LLM:
+  provider: deepseek
+  temperature: 0.7
+  max_tokens: 300000
+  roles:
+    - planner
+    - executor
 
 TAVILY_API_KEY: ${TAVILY_API_KEY}
 
 AGENT:
-  max_steps: 12
+  max_steps: 50
   # 系统提示词已迁移到 cathy/context.py（DEFAULT_SYSTEM_PROMPT），
   # 项目级规则请写入项目根的 AGENTS.md 或 CATHY.md，会自动注入。
   # 这里仅保留可选的临时附加指令：
@@ -43,7 +40,7 @@ MCP:
   mcp_servers:
     fs:
       command: npx
-      args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/east_wu/EastProject/CAD"]
       env: {}
     memory:
       command: npx
@@ -103,7 +100,7 @@ SANDBOX:
   enabled: true
   # mac 优先：seatbelt（py-sandboxrt）；若本机未装 py-sandboxrt 可先切 local_restricted
   backend: seatbelt                 # seatbelt | local_restricted
-  workspace_root: workspaces
+  workspace_root: /Users/east_wu/EastProject/CAD
   default_timeout_sec: 10
   max_timeout_sec: 30
   max_output_bytes: 65536

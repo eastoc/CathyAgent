@@ -1,0 +1,4 @@
+type: openai_compatible
+api_key: ${OPENAI_API_KEY}
+api_base: https://api.openai.com/v1
+model: gpt-4o-mini

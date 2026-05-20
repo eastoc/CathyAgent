@@ -13,7 +13,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from config.config import get_llm, load_config  # noqa: E402
+from config.config import get_llm, get_llm_provider, load_config  # noqa: E402
 
 from .agent import Agent, AgentConfig  # noqa: E402
 from .context import ContextAssembler  # noqa: E402
@@ -181,11 +181,13 @@ def _select_hooks_config(cfg: dict[str, Any]) -> tuple[dict[str, Any], str]:
 
 def build_runtime(cfg: dict | None = None) -> tuple[Agent, SessionStore, HookManager]:
     cfg = cfg if cfg is not None else load_config()
-    llm_conf = get_llm(cfg, name="deepseek")
+    llm_conf = get_llm(cfg)
+    provider = llm_conf.get("name") or get_llm_provider(cfg)
 
     if "${" in str(llm_conf.get("api_key", "")):
         sys.exit(
-            "DEEPSEEK_API_KEY 未注入。请在 config/.env 中设置 DEEPSEEK_API_KEY=... 后重试。"
+            f"LLM 供应商 {provider!r} 的 API Key 未注入。"
+            f"请在 config/.env 中配置对应环境变量（见 config.yaml → LLM.{provider}.api_key）后重试。"
         )
 
     llm = LLMClient(
