@@ -13,7 +13,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from config.config import get_llm, get_llm_provider, load_config  # noqa: E402
+from config.config import get_llm, get_llm_provider, get_workspace_plugin_config, load_config  # noqa: E402
 
 from .agent import Agent, AgentConfig  # noqa: E402
 from .context import ContextAssembler  # noqa: E402
@@ -68,18 +68,15 @@ def _build_plugin_configs(cfg: dict) -> dict[str, dict]:
     tavily_key = cfg.get("TAVILY_API_KEY") or os.environ.get("TAVILY_API_KEY", "")
     has_tavily = bool(tavily_key) and "${" not in str(tavily_key)
     sandbox_cfg = cfg.get("SANDBOX") or {}
-    workspace_root = Path(sandbox_cfg.get("workspace_root") or "workspaces")
-    if not workspace_root.is_absolute():
-        workspace_root = _PROJECT_ROOT / workspace_root
+    workspace_cfg = get_workspace_plugin_config(cfg, project_root=_PROJECT_ROOT)
     return {
         "web_search": {"api_key": tavily_key} if has_tavily else {},
-        "file_ops": {
-            "workspace_root": str(workspace_root),
-        },
+        "file_ops": dict(workspace_cfg),
+        "robot_sdk": dict(workspace_cfg),
         "current_datetime": {},
         "shell_exec": {
+            **workspace_cfg,
             "backend": str(sandbox_cfg.get("backend") or "local_restricted"),
-            "workspace_root": str(workspace_root),
             "default_timeout_sec": float(sandbox_cfg.get("default_timeout_sec", 10)),
             "max_timeout_sec": float(sandbox_cfg.get("max_timeout_sec", 30)),
             "max_output_bytes": int(sandbox_cfg.get("max_output_bytes", 65536)),

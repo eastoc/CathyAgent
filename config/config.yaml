@@ -1,8 +1,8 @@
 # LLM：provider + 通用推理参数；各供应商连接信息见 config/llm/<name>.yaml
 LLM:
-  provider: deepseek
+  provider: openai
   temperature: 0.7
-  max_tokens: 300000
+  max_tokens: 16000
   roles:
     - planner
     - executor
@@ -40,7 +40,8 @@ MCP:
   mcp_servers:
     fs:
       command: npx
-      args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/east_wu/EastProject/CAD"]
+      # 路径与 SANDBOX.workspace_root 共用，由 load_config 展开 ${WORKSPACE_ROOT}
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "${WORKSPACE_ROOT}"]
       env: {}
     memory:
       command: npx
@@ -100,7 +101,9 @@ SANDBOX:
   enabled: true
   # mac 优先：seatbelt（py-sandboxrt）；若本机未装 py-sandboxrt 可先切 local_restricted
   backend: seatbelt                 # seatbelt | local_restricted
-  workspace_root: /Users/east_wu/EastProject/CAD
+  # 会话工作空间父目录（各 session 落在 <workspace_root>/<session_id>/）
+  # 支持绝对路径、相对 CathyAgent 项目根的路径，或 ${ENV_VAR}
+  workspace_root: ../CAD
   default_timeout_sec: 10
   max_timeout_sec: 30
   max_output_bytes: 65536
