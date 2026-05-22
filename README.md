@@ -16,11 +16,15 @@ pip install -r requirements.txt
 `config/.env` 已包含示例 key（仅本地开发，已被 `.gitignore` 忽略）。如需替换：
 
 ```env
+OPENAI_API_KEY=sk-...
 DEEPSEEK_API_KEY=sk-...
+QWEN_API_KEY=sk-...
 TAVILY_API_KEY=tvly-...
 ```
 
-模型参数可在 `config/config.yaml` 中调整；系统提示词在 `cathy/context.py`；项目级规则可写入项目根的 `AGENTS.md` 或 `CATHY.md`，会自动注入。
+在 `config/config.yaml` 里切换 `LLM.provider`（`openai` / `deepseek` / `qwen`），各供应商连接信息见 `config/llm/<name>.yaml`。通用参数如 `temperature`、`max_tokens` 也在 `config/config.yaml` 的 `LLM` 段配置。OpenAI 的 GPT-5 / o-series 模型会自动适配 `max_completion_tokens` 和默认 temperature，无需手动改请求参数。
+
+系统提示词在 `cathy/context.py`；项目级规则可写入项目根的 `AGENTS.md` 或 `CATHY.md`，会自动注入。
 
 ### 3. 运行
 
@@ -36,9 +40,38 @@ python -m cathy
 你 > 搜索一下今天关于 Anthropic 的新闻并用中文总结成 3 条
 你 > 把 ROADMAP.md 第 1 节读出来
 你 > 现在几点
+你 > 建模 3DoF 机械臂，先确定 DH 参数再建模，DH 参数参考 UR3e
 ```
 
 退出：`quit` / `exit` / `q` / Ctrl+C。
+
+## Robot SDK 建模
+
+CathyAgent 内置 `robot_sdk` 插件与 `skills/robot_sdk/SKILL.md`，用于 Agent 直接编辑 `robot_model.py` 并编译导出仿真资产。
+
+标准闭环：
+
+```text
+create_robot_template
+  -> 编辑 robot_model.py（调用 robot_sdk API）
+  -> probe_robot_model（结构复杂时）
+  -> compile_robot_model
+  -> 根据 checks / summary 修复，直到 ok=true
+```
+
+编译成功后会返回：
+
+- `mjcf_path`：MuJoCo MJCF
+- `urdf_path`：URDF
+- `obj_paths`：mesh-backed visual 生成的 OBJ（默认在 `build/robot/assets/meshes/`）
+- `report_path`：校验报告
+
+机械臂建模默认会生成 OBJ visual assets；collision / inertial 仍建议使用简化 primitive。详细 API 与约定见 `robot_sdk/docs/`。
+
+示例与模板：
+
+- 模板：`plugins/builtin/robot_sdk/templates/`（`empty` / `two_link` / `three_dof_arm`）
+- 示例：`examples/robot_sdk/`（双连杆、3DoF、SCARA、夹爪、mesh visual）
 
 ## 当前能力（Phase 5.1 · MCP + 权限治理）
 
@@ -59,6 +92,7 @@ python -m cathy
 | **MCP roots 协商**（`file://` 规范化 + filesystem 参数自动推断） | ✅ |
 | **MCP 工具命名**（`mcp__<server>__<tool>`，单 server 回退 `mcp__<tool>`） | ✅ |
 | **MCP 权限治理**（`PERMISSION.mcp_rules`：deny/ask/allow） | ✅ |
+| **Robot SDK**（`robot_model.py` 建模 + MJCF/URDF/OBJ 导出） | ✅ |
 | iMessage / 远端 Linux Agent | 见 `ROADMAP.md`，后续 Phase 实现 |
 
 ## Skill 与 Subagent 是两件事
@@ -79,6 +113,7 @@ python -m cathy
 | `file_ops` | `read_file` / `list_dir` / `write_file` | 工作目录子树内的文件操作 |
 | `current_datetime` | `get_current_datetime` | 系统时间，避免模型幻觉时间 |
 | `skills` | `read_skill` | 按名拉取一份 SKILL.md 全文（progressive disclosure） |
+| `robot_sdk` | `create_robot_template` / `compile_robot_model` / `probe_robot_model` | Robot SDK 建模、校验、MJCF/URDF/OBJ 导出 |
 | `planner_executor` | `planner_executor` | LangGraph 实现的 plan-execute-replan 子 agent |
 | `mcp`（运行时注入） | `mcp__<server>__<tool>` | 外部 MCP 生态工具（FastMCP Client 聚合） |
 
@@ -130,6 +165,7 @@ PERMISSION:
 示例 skill：
 - `skills/summarize/SKILL.md` —— 三段式中文摘要
 - `skills/write_blog/SKILL.md` —— 中文技术博客写作
+- `skills/robot_sdk/SKILL.md` —— Robot SDK 建模工作流（索引 `robot_sdk/docs/`）
 
 ## Subagent 工作机制（planner_executor）
 
@@ -257,11 +293,20 @@ CathyAgent/
       plugin.py               # McpToolPlugin + build_mcp_manifest
       __init__.py
   plugins/
-    builtin/                  # web_search / file_ops / current_datetime
+    builtin/                  # web_search / file_ops / current_datetime / robot_sdk
     community/                # 用户插件
+  robot_sdk/                  # Robot SDK 核心库 + docs/
+    docs/                     # concepts / robot_arms / assets / export / troubleshooting
+    model.py                  # RobotModel / Link / Joint / Actuator ...
+    assets.py                 # AssetSession / mesh_from_vertices / mesh_from_cadquery
+    mjcf_export.py            # MJCF 导出
+    urdf_export.py            # URDF 导出
+  examples/
+    robot_sdk/                # 机械臂 / 夹爪 / mesh visual 示例
   skills/
     summarize/SKILL.md
     write_blog/SKILL.md
+    robot_sdk/SKILL.md
   data/                       # SQLite db（gitignored）
   tests/                      # unittest 套件
   main.py                     # python main.py 入口
