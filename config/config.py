@@ -18,6 +18,8 @@ CONFIG_DIR = PROJECT_ROOT / "config"
 DEFAULT_CONFIG_PATH = CONFIG_DIR / "config.yaml"
 DEFAULT_ENV_PATH = CONFIG_DIR / ".env"
 DEFAULT_LLM_CONFIG_DIR = CONFIG_DIR / "llm"
+WORKSPACE_ROOT_PLACEHOLDER = "${WORKSPACE_ROOT}"
+DEFAULT_WORKSPACE_ROOT = "workspaces"
 
 
 def _load_dotenv(path: Path) -> None:
@@ -113,6 +115,56 @@ def _merge_llm_provider_files(raw: dict, cfg_dir: Path) -> dict:
     return raw
 
 
+def get_workspace_root(
+    cfg: dict,
+    *,
+    project_root: Path | None = None,
+) -> Path:
+    """解析 SANDBOX.workspace_root 为绝对路径（相对路径基于 project_root）。"""
+    root_base = project_root or PROJECT_ROOT
+    sandbox_cfg = cfg.get("SANDBOX") or {}
+    raw = sandbox_cfg.get("workspace_root") or DEFAULT_WORKSPACE_ROOT
+    path = Path(str(raw)).expanduser()
+    if not path.is_absolute():
+        path = root_base / path
+    path.mkdir(parents=True, exist_ok=True)
+    return path.resolve()
+
+
+def _substitute_workspace_root(value: Any, workspace: str) -> Any:
+    if isinstance(value, str):
+        return value.replace(WORKSPACE_ROOT_PLACEHOLDER, workspace)
+    if isinstance(value, dict):
+        return {k: _substitute_workspace_root(v, workspace) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_substitute_workspace_root(v, workspace) for v in value]
+    return value
+
+
+def get_workspace_plugin_config(
+    cfg: dict,
+    *,
+    project_root: Path | None = None,
+) -> dict[str, str]:
+    """返回各内置插件共用的 workspace_root 配置片段。"""
+    return {"workspace_root": str(get_workspace_root(cfg, project_root=project_root))}
+
+
+def resolve_config_paths(
+    raw: dict,
+    *,
+    project_root: Path | None = None,
+) -> dict:
+    """把配置里的 ${WORKSPACE_ROOT} 占位符替换为 SANDBOX.workspace_root 解析结果。"""
+    root_base = project_root or PROJECT_ROOT
+    workspace = str(get_workspace_root(raw, project_root=root_base))
+    resolved = _substitute_workspace_root(raw, workspace)
+    sandbox_cfg = resolved.get("SANDBOX")
+    if isinstance(sandbox_cfg, dict):
+        sandbox_cfg["workspace_root"] = workspace
+    return resolved
+
+
 def load_config(path: Path | str | None = None) -> dict:
     """加载配置；自动注入 .env，合并 LLM 子配置，并展开 ${ENV} 占位符。"""
     _load_dotenv(DEFAULT_ENV_PATH)
@@ -121,7 +173,8 @@ def load_config(path: Path | str | None = None) -> dict:
     with open(cfg_path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
     raw = _merge_llm_provider_files(raw, cfg_dir)
-    return _expand_env(raw)
+    raw = _expand_env(raw)
+    return resolve_config_paths(raw, project_root=PROJECT_ROOT)
 
 
 def _llm_provider_entries(cfg: dict) -> dict[str, dict]:

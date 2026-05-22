@@ -1,0 +1,94 @@
+name: robot_sdk
+version: 0.1.0
+description: Robot SDK tools for scaffolded RobotModel authoring, validation, MJCF export, and URDF export.
+
+tools:
+  - name: create_robot_template
+    description: >-
+      Create a robot_model.py scaffold using the Robot SDK. Use this before
+      editing a new robot design script, then edit the Python model directly.
+    input_schema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Relative workspace path for the generated Python model script.
+          default: robot_model.py
+        overwrite:
+          type: boolean
+          description: Whether to overwrite an existing file.
+          default: false
+        template:
+          type: string
+          description: Which scaffold to create.
+          enum: [empty, two_link, three_dof_arm]
+          default: two_link
+      required: []
+      additionalProperties: false
+
+  - name: compile_robot_model
+    description: >-
+      Load a Robot SDK Python script, validate the RobotModel, export MJCF and
+      URDF, return structured checks and fix suggestions, and optionally run a
+      MuJoCo smoke test if mujoco is installed. Treat this as the authoritative
+      validation step after editing robot_model.py.
+    input_schema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Relative workspace path to robot_model.py.
+          default: robot_model.py
+        output_dir:
+          type: string
+          description: Relative workspace output directory for MJCF, URDF, and reports.
+          default: build/robot
+        strict:
+          type: boolean
+          description: Whether to require a single connected link tree.
+          default: true
+        run_smoke_test:
+          type: boolean
+          description: Whether to load and step the MJCF with mujoco if available.
+          default: false
+        smoke_steps:
+          type: integer
+          description: Number of MuJoCo steps for smoke testing.
+          default: 200
+          minimum: 0
+      required: []
+      additionalProperties: false
+
+  - name: probe_robot_model
+    description: >-
+      Load a Robot SDK Python script and return a structural summary of links,
+      joints, actuators, sensors, roots, total mass, and validation checks. Use
+      this to understand an existing robot_model.py before editing.
+    input_schema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Relative workspace path to robot_model.py.
+          default: robot_model.py
+        strict:
+          type: boolean
+          description: Whether to require a single connected link tree while probing.
+          default: true
+      required: []
+      additionalProperties: false
+
+permissions:
+  filesystem: sandbox
+  network: none
+  shell: false
+
+execution:
+  runtime: python
+  entrypoint: main:RobotSdkPlugin
+  timeout_seconds: 30
+  sandbox: false
+
+metadata:
+  trust_level: verified
+  tags: [robotics, mujoco, cadquery]

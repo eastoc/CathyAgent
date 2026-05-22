@@ -5,7 +5,16 @@ from pathlib import Path
 
 import yaml
 
-from config.config import _LLM_META_KEYS, get_llm, get_llm_provider, load_config
+from config.config import (
+    WORKSPACE_ROOT_PLACEHOLDER,
+    _LLM_META_KEYS,
+    get_llm,
+    get_llm_provider,
+    get_workspace_root,
+    get_workspace_plugin_config,
+    load_config,
+    resolve_config_paths,
+)
 
 
 class LlmConfigTest(unittest.TestCase):
@@ -135,6 +144,53 @@ class LlmConfigTest(unittest.TestCase):
         self.assertEqual(llm["temperature"], llm_section["temperature"])
         self.assertEqual(llm["max_tokens"], llm_section["max_tokens"])
         self.assertEqual(llm["roles"], llm_section["roles"])
+
+
+class WorkspaceConfigTest(unittest.TestCase):
+    def test_get_workspace_root_resolves_relative_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = {"SANDBOX": {"workspace_root": "data/ws"}}
+            ws = get_workspace_root(cfg, project_root=root)
+            self.assertEqual(ws, (root / "data/ws").resolve())
+            self.assertTrue(ws.is_dir())
+
+    def test_resolve_config_paths_substitutes_workspace_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = {
+                "SANDBOX": {"workspace_root": "cad_root"},
+                "MCP": {
+                    "mcp_servers": {
+                        "fs": {
+                            "args": [
+                                "-y",
+                                "@modelcontextprotocol/server-filesystem",
+                                WORKSPACE_ROOT_PLACEHOLDER,
+                            ]
+                        }
+                    }
+                },
+            }
+            resolved = resolve_config_paths(cfg, project_root=root)
+            expected = str((root / "cad_root").resolve())
+            self.assertEqual(resolved["SANDBOX"]["workspace_root"], expected)
+            self.assertEqual(resolved["MCP"]["mcp_servers"]["fs"]["args"][-1], expected)
+
+    def test_load_config_expands_workspace_root_in_mcp_fs(self) -> None:
+        cfg = load_config()
+        ws = get_workspace_root(cfg)
+        fs_args = cfg["MCP"]["mcp_servers"]["fs"]["args"]
+        self.assertEqual(fs_args[-1], str(ws))
+        self.assertNotIn(WORKSPACE_ROOT_PLACEHOLDER, fs_args[-1])
+
+    def test_workspace_plugin_config_shared_by_plugins(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = {"SANDBOX": {"workspace_root": "shared_ws"}}
+            plugin_cfg = get_workspace_plugin_config(cfg, project_root=root)
+            expected = str((root / "shared_ws").resolve())
+            self.assertEqual(plugin_cfg["workspace_root"], expected)
 
 
 if __name__ == "__main__":
