@@ -21,7 +21,33 @@ shoulder = robot.joint("shoulder", "revolute", parent=base, child=link1, ...)
 The link tree must have exactly one root in strict mode. The root is the link
 that is not a child of any joint, usually `base`.
 
+## Kinematics-First Pipeline
+
+For new serial manipulators, prefer defining the mathematical model first and
+compiling it into `RobotModel`. This keeps the kinematic intent separate from
+the visual modeling pass:
+
+```python
+from robot_sdk import compile_serial_manipulator, demo_three_dof_spec
+
+
+def build_robot_model():
+    spec = demo_three_dof_spec()
+    return compile_serial_manipulator(spec, name="three_dof_arm")
+```
+
+The compiler creates a connected link/joint tree, joint limits, actuators,
+joint position sensors, simple placeholder visual/collision geometry, and
+metadata that records the source DH row for each generated joint. Detailed
+robot appearance and OBJ output should be added later by geometry helpers or
+mesh-backed visual assets.
+
 ## Frame Convention
+
+This section explains the frame convention behind the compiler and historical
+primitive scaffolds. For new robot arms, use the kinematics-first pipeline
+above instead of writing this code by hand unless you are doing a focused
+geometry/assets pass.
 
 For simple arms, use this convention:
 
@@ -61,9 +87,10 @@ A simple 3DoF arm can use:
 Use one actuator per driven joint and at least one joint position sensor for
 each joint.
 
-When the user asks for a new 3DoF arm, default to mesh-backed visuals so OBJ
-files are generated during compile. The kinematic and dynamic model can still
-use simplified primitive collision and inertial estimates.
+When the user asks for a new 3DoF arm, start from a `SerialManipulatorSpec`
+and `compile_serial_manipulator(...)`. Add mesh-backed visuals in a separate
+geometry/assets pass when OBJ output is required; collision and inertial data
+can still use simplified primitive estimates.
 
 ## Motor and Gearbox Visuals
 
@@ -115,6 +142,29 @@ base
 Model the wrist as short links with clear joint origins. Do not collapse all
 wrist joints into one link if the user asked for articulation.
 
+Use role names that encode both the wrist order and intended axis, such as
+`wrist_1_pitch`, `wrist_2_yaw`, and `wrist_3_roll`. The semantic compiler
+derives link names from joint names, so a joint named `wrist_1` becomes
+`wrist_1_link` in the compiled `RobotModel`.
+
+For a UR3e-like scaffold, use the kinematics-first template:
+
+```python
+from robot_sdk import compile_serial_manipulator, ur3e_like_spec
+
+
+def build_robot_model():
+    spec = ur3e_like_spec()
+    return compile_serial_manipulator(spec, name="ur3e_like")
+```
+
+This produces six revolute joints and these semantic links:
+
+```text
+base_link -> shoulder_link -> upper_arm_link -> forearm_link
+  -> wrist_1_link -> wrist_2_link -> wrist_3_link -> tool0
+```
+
 ## SCARA Pattern
 
 A SCARA-like arm commonly uses:
@@ -142,7 +192,7 @@ Add actuators to both finger joints unless modeling coupled motion manually.
 - Keep the kinematic tree connected.
 - Avoid floating links: every link except root must be the child of exactly one joint.
 - Give every driven joint a visible motor/gearbox/bearing housing unless the user explicitly asks for a bare kinematic diagram.
-- Generate OBJ assets for primary robot arm visuals by default, using mesh-backed visuals rather than primitive-only visuals.
+- Prefer kinematics-first specs for serial arms; add OBJ assets in the geometry/assets pass rather than mixing visual design into the DH spec.
 - Do not use visual mesh as collision when a simple primitive will do.
 - Give realistic joint limits rather than arbitrary huge ranges.
 - Use `probe_robot_model` before editing a large existing model.

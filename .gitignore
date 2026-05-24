@@ -3,8 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
-tests/
-workspaces/
+tests/*
+!tests/test_robot_sdk.py
+
 data/
 /data/**
 *.db
