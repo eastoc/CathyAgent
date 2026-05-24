@@ -1,12 +1,13 @@
 name: robot_sdk
 version: 0.1.0
-description: Robot SDK tools for scaffolded RobotModel authoring, validation, MJCF export, and URDF export.
+description: Robot SDK tools for kinematics-first RobotModel authoring, validation, MJCF/URDF export, and OBJ asset reporting.
 
 tools:
   - name: create_robot_template
     description: >-
-      Create a robot_model.py scaffold using the Robot SDK. Use this before
-      editing a new robot design script, then edit the Python model directly.
+      Create a robot_model.py scaffold using the Robot SDK. For serial arms,
+      the default scaffold is kinematics-first: edit the Python spec, then
+      compile it into RobotModel.
     input_schema:
       type: object
       properties:
@@ -20,8 +21,8 @@ tools:
           default: false
         template:
           type: string
-          description: Which scaffold to create.
-          enum: [empty, two_link, three_dof_arm]
+          description: Which scaffold to create. Serial arm scaffolds use the kinematics-first workflow.
+          enum: [empty, two_link, three_dof_arm, ur3e_like]
           default: two_link
       required: []
       additionalProperties: false
@@ -29,7 +30,7 @@ tools:
   - name: compile_robot_model
     description: >-
       Load a Robot SDK Python script, validate the RobotModel, export MJCF and
-      URDF, return structured checks and fix suggestions, and optionally run a
+      URDF, report generated OBJ asset paths, return structured checks and fix suggestions, and optionally run a
       MuJoCo smoke test if mujoco is installed. Treat this as the authoritative
       validation step after editing robot_model.py.
     input_schema:

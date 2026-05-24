@@ -1,6 +1,6 @@
 # LLM：provider + 通用推理参数；各供应商连接信息见 config/llm/<name>.yaml
 LLM:
-  provider: openai
+  provider: deepseek #openai
   temperature: 0.7
   max_tokens: 16000
   roles:

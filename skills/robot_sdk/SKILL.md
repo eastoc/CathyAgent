@@ -17,6 +17,7 @@ version: 0.1.0
 ## 核心原则
 
 - 直接编辑 `robot_model.py`，在 Python 中调用 `robot_sdk` API。不要手写最终 MJCF/URDF。
+- 新建 serial manipulator / 机械臂时，优先定义 `SerialManipulatorSpec` / `DHJoint`，再调用 `compile_serial_manipulator(spec)` 生成 `RobotModel`；只有简单零件或临时修补才直接手写 link/joint。
 - 如果没有模型文件，先调用 `create_robot_template` 生成 scaffold。
 - 修改后调用 `compile_robot_model`，以返回的 `summary`、`checks.summary` 和 `checks.issues` 作为修复依据。
 - 如果已有模型较复杂，先调用 `probe_robot_model` 理解 link、joint、actuator、sensor 和 root link。
@@ -35,10 +36,10 @@ version: 0.1.0
 ## 标准闭环
 
 1. 读取当前 `robot_model.py`。
-2. 小步修改 `build_robot_model() -> RobotModel`；新建机械臂时默认创建 `assets = AssetSession("build/robot")`。
-3. 调用 `compile_robot_model`。
-4. 如果 `ok=false`，根据 `summary.suggestions` 和具体 issue 修复。
-5. 机械臂主要可见部件默认用 `mesh_from_vertices(...)` 或 `mesh_from_cadquery(...)` 创建 mesh-backed visual，并保留 primitive collision/inertial；primitive `Box`/`Cylinder`/`Sphere` 不会自动生成 OBJ。
+2. 新建机械臂时先写数学层：确定 DH/modified-DH 参数，构造 `SerialManipulatorSpec`，调用 `compile_serial_manipulator(spec)`。
+3. 需要可查看外观时再创建 `assets = AssetSession("build/robot")`，为主要 visual 添加 mesh-backed assets；primitive `Box`/`Cylinder`/`Sphere` 不会自动生成 OBJ。
+4. 调用 `compile_robot_model`。
+5. 如果 `ok=false`，根据 `summary.suggestions` 和具体 issue 修复。
 6. 编译通过后返回 `mjcf_path`、`urdf_path`、`obj_paths`、`report_path`；OBJ 通常在 `build/robot/assets/meshes/*.obj`。
 
 ## 建模约定
@@ -49,6 +50,7 @@ version: 0.1.0
 - 被驱动的 joint 通常要配一个 `robot.actuator(...)`。
 - 被驱动的机械臂 joint 也应该有可见电机/减速器外观：在关节附近添加 `Cylinder`/`Box` visual（如 motor housing、gearbox、bearing cap）。`Actuator` 是控制通道，不会自动生成可见电机几何。
 - 机械臂的主要外观 visual 默认应使用 mesh-backed visual 生成 OBJ；collision 和 inertial 继续使用简化 primitive。
+- `compile_serial_manipulator(...)` 负责生成运动学语义结构和 placeholder geometry；真实外观和 OBJ 应由后续 geometry/assets 步骤补充。
 - 需要观测关节状态时添加 `robot.sensor("name", "jointpos", "joint_name")` 或 `jointvel`。
 - 每个 link 尽量都有 visual、collision、inertial；缺少时 compile 会 warning。
 

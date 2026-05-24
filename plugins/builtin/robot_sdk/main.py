@@ -23,6 +23,7 @@ _TEMPLATE_FILES = {
     "empty": "empty.py",
     "two_link": "two_link.py",
     "three_dof_arm": "three_dof_arm.py",
+    "ur3e_like": "ur3e_like.py",
 }
 
 _ISSUE_SUGGESTIONS = {
@@ -37,6 +38,10 @@ _ISSUE_SUGGESTIONS = {
     "sensor_missing_joint": "Bind joint position/velocity sensors to existing joint names.",
     "sensor_missing_link": "Bind body sensors to existing link names.",
     "zero_joint_axis": "Use a non-zero axis vector, usually (0, 0, 1), (0, 1, 0), or (1, 0, 0).",
+    "ur3e_revolute_count": "Keep UR3e-like scaffolds at exactly 6 revolute joints.",
+    "ur3e_missing_wrist_axes": "Use wrist_1_pitch, wrist_2_yaw, and wrist_3_roll roles for the UR3e-like wrist.",
+    "ur3e_missing_axis_hint": "Declare axis_hint on each UR3e-like joint so compiled joint axes stay explicit.",
+    "ur3e_missing_tool0": "Set tool_frame='tool0' on the UR3e-like SerialManipulatorSpec.",
 }
 
 
