@@ -1,6 +1,6 @@
 # CathyAgent
 
-借鉴 Claude Code 设计哲学的本地 Agent harness。详细架构见 `ARCHITECTURE.md`，分阶段路线图见 `ROADMAP.md`。
+我们正在尝试用CathyAgent构建CAD Agent，用于进行机械人的设计和建模
 
 ## 快速开始
 
