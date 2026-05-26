@@ -1,5 +1,5 @@
 # CathyAgent — MVP 实施路线图（Vibe Coding 版）
-
+我们正在尝试用CathyAgent构建CAD Agent，用于进行机械人的设计和建模
 > 工作空间：`CathyAgent/`
 > 配套文档：`ARCHITECTURE.md`（设计目标态）、本文（实施分阶段计划）
 > 设计基调：借鉴 **Claude Code** 的 agent 框架，主干极简，复杂度沉到工具与上下文层。
