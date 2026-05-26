@@ -1,6 +1,6 @@
 # CathyAgent
 
-我们正在尝试用CathyAgent构建CAD Agent，用于进行机械人的设计和建模
+我们正在尝试用CathyAgent构建CAD Agent，用于进行机器人的设计和建模
 
 ## 快速开始
 
