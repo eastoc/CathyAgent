@@ -31,6 +31,7 @@ from robot_sdk import (  # noqa: E402
     check_robot_model,
     check_serial_manipulator_spec,
     check_ur3e_like_spec,
+    build_semantic_graph,
     compile_serial_manipulator,
     demo_six_dof_spec,
     demo_three_dof_spec,
@@ -44,6 +45,7 @@ from robot_sdk import (  # noqa: E402
     mesh_from_vertices,
     modified_dh_transform,
     planar_two_dof_spec,
+    SemanticGraphBuildError,
     standard_dh_transform,
     translation_of,
     ur3e_like_spec,
@@ -671,6 +673,115 @@ class RobotSdkKinematicsTest(unittest.TestCase):
 
         self.assertIn("<mujoco", export_mjcf(robot, pretty=False))
         self.assertIn("<robot", export_urdf(robot, pretty=False))
+
+    def test_build_semantic_graph_creates_base_rooted_chain(self) -> None:
+        spec = demo_three_dof_spec()
+        robot = compile_serial_manipulator(spec)
+
+        graph = build_semantic_graph(robot, spec=spec)
+
+        self.assertEqual(graph.root, "base")
+        self.assertEqual(graph.path_to("tool0"), ["base", "shoulder_yaw_link", "shoulder_pitch_link", "wrist_pitch_link", "tool0"])
+        self.assertEqual(graph.children("base"), ["shoulder_yaw_link"])
+        self.assertEqual(graph.get("shoulder_pitch_link").parent, "shoulder_yaw_link")
+        self.assertEqual(graph.get("shoulder_pitch_link").incoming_joint, "shoulder_pitch")
+        self.assertEqual(graph.get("shoulder_pitch_link").dh_index, 1)
+        self.assertEqual(graph.get("shoulder_pitch_link").role, "upper_arm")
+
+    def test_build_semantic_graph_records_spans_axes_and_metadata(self) -> None:
+        spec = demo_three_dof_spec()
+        robot = compile_serial_manipulator(spec)
+
+        graph = build_semantic_graph(robot, spec=spec)
+        first_edge = graph.edge("base", "shoulder_yaw_link")
+        second_edge = graph.edge("shoulder_yaw_link", "shoulder_pitch_link")
+
+        self.assertVecAlmostEqual(first_edge.span, (0.0, 0.0, 0.08))
+        self.assertAlmostEqual(first_edge.span_length, 0.08)
+        self.assertEqual(first_edge.axis, (0.0, 0.0, 1.0))
+        self.assertVecAlmostEqual(second_edge.span, (0.32, 0.0, 0.0))
+        self.assertEqual(graph.get("shoulder_pitch_link").metadata["joint"]["dh"]["theta"], "q2")
+        self.assertEqual(graph.get("shoulder_pitch_link").metadata["kinematic_joint"]["role"], "upper_arm")
+
+    def test_semantic_graph_frame_matches_zero_pose_forward_kinematics(self) -> None:
+        spec = demo_three_dof_spec()
+        robot = compile_serial_manipulator(spec)
+
+        graph = build_semantic_graph(robot, spec=spec)
+        wrist_node = graph.get("wrist_pitch_link")
+        expected = forward_kinematics(spec, [0.0, 0.0, 0.0])
+
+        self.assertVecAlmostEqual(wrist_node.frame.xyz, translation_of(expected))
+
+    def test_semantic_graph_supports_prismatic_joint(self) -> None:
+        robot = RobotModel("prismatic_graph")
+        base = robot.link("base")
+        slider = robot.link("slider")
+        robot.joint(
+            "slide_z",
+            "prismatic",
+            parent=base,
+            child=slider,
+            origin=Origin(xyz=(0.0, 0.0, 0.2)),
+            axis=(0.0, 0.0, 1.0),
+            limit=JointLimit(lower=0.0, upper=0.1),
+        )
+
+        graph = build_semantic_graph(robot)
+
+        self.assertEqual(graph.root, "base")
+        self.assertEqual(graph.edge("base", "slider").kind, "joint")
+        self.assertEqual(graph.get("slider").axis, (0.0, 0.0, 1.0))
+        self.assertVecAlmostEqual(graph.get("slider").frame.xyz, (0.0, 0.0, 0.2))
+
+    def test_semantic_graph_preserves_nonzero_rpy_origin(self) -> None:
+        robot = RobotModel("rpy_graph")
+        base = robot.link("base")
+        elbow = robot.link("elbow")
+        robot.joint(
+            "base_to_elbow",
+            "fixed",
+            parent=base,
+            child=elbow,
+            origin=Origin(xyz=(0.1, 0.0, 0.0), rpy=(0.0, math.pi / 2.0, 0.0)),
+        )
+
+        graph = build_semantic_graph(robot)
+
+        self.assertVecAlmostEqual(graph.get("elbow").frame.xyz, (0.1, 0.0, 0.0))
+        self.assertVecAlmostEqual(graph.get("elbow").frame.rpy, (0.0, math.pi / 2.0, 0.0))
+
+    def test_semantic_graph_without_spec_still_uses_robot_metadata(self) -> None:
+        robot = compile_serial_manipulator(demo_three_dof_spec())
+
+        graph = build_semantic_graph(robot)
+
+        self.assertEqual(graph.root, "base")
+        self.assertEqual(graph.metadata["kinematic_spec"], None)
+        self.assertEqual(graph.get("shoulder_pitch_link").role, "upper_arm")
+        self.assertEqual(graph.get("shoulder_pitch_link").dh_index, 1)
+
+    def test_ur3e_like_semantic_graph_matches_robot_model_chain(self) -> None:
+        spec = ur3e_like_spec()
+        robot = compile_serial_manipulator(spec)
+
+        graph = build_semantic_graph(robot, spec=spec)
+
+        self.assertEqual(graph.root, "base_link")
+        self.assertEqual(graph.order, [link.name for link in robot.links])
+        self.assertEqual(graph.path_to("tool0")[-3:], ["wrist_2_link", "wrist_3_link", "tool0"])
+        self.assertEqual(graph.get("wrist_2_link").axis, (0.0, 0.0, 1.0))
+        self.assertEqual(graph.get("wrist_2_link").dh_index, 4)
+        self.assertAlmostEqual(graph.get("shoulder_link").axis_angle_to_children["upper_arm_link"], math.pi / 2.0)
+        self.assertEqual(graph.edge("wrist_3_link", "tool0").kind, "fixed")
+
+    def test_build_semantic_graph_rejects_multiple_roots(self) -> None:
+        robot = RobotModel("bad_graph")
+        robot.link("base_a")
+        robot.link("base_b")
+
+        with self.assertRaisesRegex(SemanticGraphBuildError, "exactly one root"):
+            build_semantic_graph(robot)
 
 
 if __name__ == "__main__":

@@ -28,7 +28,15 @@ from .kinematics import (
     ur3e_like_spec,
 )
 from .mjcf_export import export_mjcf
-from .semantic import SerialCompileOptions, compile_serial_manipulator
+from .semantic import (
+    SemanticEdge,
+    SemanticGraph,
+    SemanticGraphBuildError,
+    SemanticNode,
+    SerialCompileOptions,
+    build_semantic_graph,
+    compile_serial_manipulator,
+)
 from .urdf_export import export_urdf
 from .model import (
     Actuator,
@@ -76,6 +84,10 @@ __all__ = [
     "QuadrupedSpec",
     "RobotModel",
     "Sensor",
+    "SemanticEdge",
+    "SemanticGraph",
+    "SemanticGraphBuildError",
+    "SemanticNode",
     "SerialCompileOptions",
     "SerialManipulatorSpec",
     "Sphere",
@@ -85,6 +97,7 @@ __all__ = [
     "check_robot_model",
     "check_serial_manipulator_spec",
     "check_ur3e_like_spec",
+    "build_semantic_graph",
     "compile_serial_manipulator",
     "demo_six_dof_spec",
     "demo_three_dof_spec",

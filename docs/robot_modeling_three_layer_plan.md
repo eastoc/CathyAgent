@@ -114,7 +114,13 @@ class QuadrupedSpec:
 
 ### 2. 语义图谱层：SemanticGraph（base 为根）
 
-这一层不推翻现有 `RobotModel`，而是在 `RobotModel` 之上或旁边构建一个以 `base` 为 root 的机器人语义图谱。`RobotModel` 继续作为 URDF / MJCF 导出的事实模型；`SemanticGraph` 负责让 agent 理解“机器人是一棵从底座生长到末端的装配树”。
+这一层不推翻现有 `RobotModel`，而是在 `RobotModel` 之上或旁边构建一个以 `base` 为 root 的机器人语义图谱。`RobotModel` 继续作为 URDF / MJCF 导出的事实模型；`SemanticGraph` 是 SDK 的稳定事实层，负责让 agent 理解“机器人是一棵从底座生长到末端的装配树”。
+
+边界原则：
+
+- `SemanticGraph`、`build_semantic_graph(...)`、图谱校验和基础节点分类必须由 SDK 提供，不能让 agent 每次临时推断。
+- Agent / skill 只负责调用图谱 API、选择 style / catalog / 局部参数 override，并根据校验结果迭代。
+- 几何层和标准件库只能消费 `SemanticGraph`，不应靠 link name 写死某个机械臂型号。
 
 它回答：
 
@@ -145,21 +151,40 @@ def compile_serial_manipulator(spec: SerialManipulatorSpec) -> RobotModel:
 @dataclass
 class SemanticNode:
     name: str
-    kind: Literal["link", "joint", "frame", "assembly"]
+    kind: Literal["link"]
     role: str | None
     parent: str | None
     children: list[str]
-    frame: Origin
+    frame: Origin  # root 到当前 link frame 的全局位姿
     axis: tuple[float, float, float] | None = None
     link_name: str | None = None
     joint_name: str | None = None
+    incoming_joint: str | None = None
+    dh_index: int | None = None
     span_to_children: dict[str, tuple[float, float, float]] = field(default_factory=dict)
+    axis_angle_to_children: dict[str, float] = field(default_factory=dict)
+    metadata: dict = field(default_factory=dict)
     visual_intent: dict = field(default_factory=dict)
 
 
-def build_semantic_graph(spec: SerialManipulatorSpec, robot: RobotModel) -> SemanticGraph:
+@dataclass(frozen=True)
+class SemanticEdge:
+    parent: str
+    child: str
+    kind: Literal["joint", "fixed"]
+    joint_name: str | None
+    origin: Origin
+    axis: tuple[float, float, float] | None
+    span: tuple[float, float, float]
+    span_length: float
+    metadata: dict = field(default_factory=dict)
+
+
+def build_semantic_graph(robot: RobotModel, *, spec: SerialManipulatorSpec | None = None) -> SemanticGraph:
     ...
 ```
+
+图谱以 link node 为主，joint 信息同时存在于 `SemanticEdge` 和 child node 的 `incoming_joint` 字符串上：edge 表示 parent -> child 的连接事实，`incoming_joint` 让从某个节点出发时能快速知道它由哪个 joint 挂到父节点。
 
 职责：
 
@@ -228,7 +253,7 @@ robot_sdk/geometry/
 
 ```python
 # 从语义图谱出发生成外观（默认推荐）
-graph = build_semantic_graph(spec, robot)
+graph = build_semantic_graph(robot, spec=spec)
 add_geometry_from_root(robot, graph, assets=assets, style=IndustrialArmStyle())
 
 # 底层仍保留 CadQuery 原子零件，供合成器或用户直接调用
@@ -273,7 +298,7 @@ def build_robot_model():
     spec = ur3e_like_spec(scale=1.0)
     robot = compile_serial_manipulator(spec)
 
-    graph = build_semantic_graph(spec, robot)
+    graph = build_semantic_graph(robot, spec=spec)
     assets = AssetSession("build/robot")
     add_geometry_from_root(robot, graph, assets=assets, style=IndustrialArmStyle())
 
@@ -317,7 +342,7 @@ Skill 层：
   - 编译失败时按 report 和 checks 修复
 ```
 
-在 Phase 5 的 API 尚未全部实现前，skill 仍可约束 agent 采用同一思路手动补外观：先分析 base/root、joint axis、child span 和节点 role，再用 `mesh_from_cadquery(...)` 把 CadQuery visual 挂到正确 link。等 `SemanticGraph` 和 `add_geometry_from_root(...)` 实现后，skill 只需要把手动步骤替换成正式 API 调用。
+在 Phase 5 的 API 尚未全部实现前，skill 仍可约束 agent 采用同一思路手动补外观：先分析 base/root、joint axis、child span 和节点 role，再用 `mesh_from_cadquery(...)` 把 CadQuery visual 挂到正确 link。等 `SemanticGraph` 和 `add_geometry_from_root(...)` 实现后，skill 必须优先调用正式 SDK API，而不是继续让 agent 自行构图。
 
 ## TODO List
 
@@ -372,31 +397,57 @@ Skill 层：
 
 备注：UR3e-like 的 link 命名由 semantic compiler 根据 joint 名派生（例如 `wrist_1` -> `wrist_1_link`），所以 builder 通过稳定的 joint 名和 `tool_frame="tool0"` 达成上述 link 约定。
 
-### Phase 5：语义图谱驱动的几何生成
+### Phase 5：SDK 语义图谱驱动的几何生成
 
-Phase 5 从“建设零件库 + 某型号装配 helper”调整为“先构建 base-rooted 语义图谱，再从根节点遍历生成几何”。CadQuery 原子零件仍然重要，但它们只是合成器使用的形状词汇；标准件库后置为可选增强。
+Phase 5 从“建设零件库 + 某型号装配 helper”调整为“先在 SDK 中构建 base-rooted 语义图谱，再从根节点遍历生成几何”。CadQuery 原子零件仍然重要，但它们只是合成器使用的形状词汇；标准件库后置为可选增强。
+
+责任边界：
+
+```text
+SDK 负责：
+  - SemanticGraph 数据结构
+  - build_semantic_graph(...)
+  - 图谱校验
+  - GeometryContext / classify_geometry_kind(...)
+  - CadQuery 原子零件
+  - add_geometry_from_root(...)
+
+Agent / skill 负责：
+  - 选择 spec / style / standard part catalog
+  - 调用 SDK API
+  - 根据 graph / checks / render 结果迭代参数
+  - 只做局部 override，不临时重建图谱规则
+```
 
 #### Phase 5A：构建 base-rooted SemanticGraph
 
-- [ ] 新增 `robot_sdk/semantic/graph.py`。
-- [ ] 实现 `SemanticNode` 和 `SemanticGraph`。
-- [ ] 实现 `build_semantic_graph(spec, robot)`。
-- [ ] 将 `RobotModel` 的 link / joint tree 转为以 base/root 为根的图谱。
-- [ ] 为节点写入 `kind`、`role`、`frame`、`axis`、`link_name`、`joint_name`。
-- [ ] 计算 parent / children、span vector、span length、相邻 joint axis 夹角。
-- [ ] 将 `DHJoint.role`、`metadata` 和 compiler 写入的 `meta` 合并为几何可用的语义提示。
-- [ ] 确保图谱能处理 serial manipulator 的 base -> joints -> tool 链路。
+- [x] 新增 `robot_sdk/semantic/graph.py`。
+- [x] 实现 `SemanticNode` 和 `SemanticGraph`。
+- [x] 实现 `build_semantic_graph(robot, *, spec=None)`。
+- [x] 将 `RobotModel` 的 link / joint tree 转为以 base/root 为根的图谱。
+- [x] 为节点写入 `kind`、`role`、`frame`、`axis`、`link_name`、`joint_name`。
+- [x] 计算 parent / children、span vector、span length、相邻 joint axis 夹角。
+- [x] 将 `DHJoint.role`、`metadata` 和 compiler 写入的 `meta` 合并为几何可用的语义提示。
+- [x] 确保图谱能处理 serial manipulator 的 base -> joints -> tool 链路。
+- [x] 验收：graph 只有一个 root。
+- [x] 验收：root 是 base / base_link 或显式指定的 root link。
+- [x] 验收：每个非 root node 有唯一 parent。
+- [x] 验收：每条 edge 绑定一个 incoming joint 或 fixed frame relation。
+- [x] 验收：serial manipulator 的 path 顺序与 `RobotModel.joints` 的 parent / child 链一致。
+- [x] 验收：node 能读取 role、dh_index、span、joint_axis 和 metadata。
+- [x] 验收：图谱构建失败时返回可读错误，不让几何层继续猜。
 
 #### Phase 5B：节点几何上下文与形态分类
 
 - [ ] 新增 `robot_sdk/geometry/context.py`。
 - [ ] 新增 `robot_sdk/geometry/classify.py`。
 - [ ] 定义 `GeometryContext`，描述当前节点、父节点、子节点、span、axis 和 role。
-- [ ] 定义 `GeometryKind`，例如 `base_turntable`、`t_joint`、`inline_joint`、`elbow_joint`、`rounded_link`、`wrist_stack`、`tool_flange`。
+- [ ] 定义第一版 `GeometryKind`：`base_turntable`、`inline_link`、`offset_link`、`generic_joint`、`elbow_joint`、`wrist_stack`、`tool_flange`。
 - [ ] 实现 `classify_geometry_kind(ctx)`。
 - [ ] 规则：base/root 节点生成 `base_turntable`。
-- [ ] 规则：joint axis 与 child span 近似垂直时生成 `t_joint`。
-- [ ] 规则：joint axis 与 child span 近似平行时生成 `inline_joint`。
+- [ ] 规则：joint axis 与 child span 近似垂直时生成 `generic_joint` 或 `elbow_joint`。
+- [ ] 规则：joint axis 与 child span 近似平行时生成 `inline_link`。
+- [ ] 规则：存在明显 offset span 时生成 `offset_link`。
 - [ ] 规则：连续短 span 且多个 wrist role joint 生成 `wrist_stack`。
 - [ ] 规则：叶子 tool 节点生成 `tool_flange`。
 - [ ] 保持规则保守；无法判断时生成简洁 placeholder mesh，不伪装成精确工业设计。
@@ -434,7 +485,19 @@ Phase 5 从“建设零件库 + 某型号装配 helper”调整为“先构建 b
 - [ ] 确保调用后 `compile_robot_model` 能返回非空 `obj_paths`。
 - [ ] 在 `ur3e_like` 示例中演示“spec -> RobotModel -> SemanticGraph -> root geometry”的推荐顺序。
 
-#### Phase 5E：GB/ISO 标准件库导入（可选增强）
+#### Phase 5E：图谱 / 几何校验
+
+- [ ] 新增 `robot_sdk/geometry/checks.py`。
+- [ ] 检查 `SemanticGraph` 只有一个 base/root。
+- [ ] 检查 `SemanticGraph` 中每个非 root 节点都有 parent。
+- [ ] 检查主要 joint 节点都有 axis、frame 和可用于几何生成的 span 信息。
+- [ ] 检查 visual 不能全部是 primitive。
+- [ ] 检查主要 link 是否缺少 visual mesh。
+- [ ] 检查主要 revolute joint 附近是否生成 mesh-backed visual。
+- [ ] 检查 mesh visual 不跨越会相对运动的 joint。
+- [ ] 检查 wrist 不能全部塌成一个 link。
+
+#### Phase 5F：GB/ISO 标准件库导入（可选增强）
 
 - [ ] 新增 `robot_sdk/geometry/library.py`。
 - [ ] 定义标准件目录结构，例如 `robot_sdk/geometry/catalogs/standard/` 与外部资产路径。
@@ -449,20 +512,12 @@ Phase 5 从“建设零件库 + 某型号装配 helper”调整为“先构建 b
 ### Phase 7：扩展校验
 
 - [ ] 新增 `robot_sdk/kinematics/checks.py`。
-- [ ] 新增 `robot_sdk/geometry/checks.py`。
 - [ ] 检查数学模型 DOF 与 joint 数一致。
 - [ ] 检查 joint limit 合理性。
 - [ ] 检查 serial manipulator link chain 连续。
-- [ ] 检查 `SemanticGraph` 只有一个 base/root。
-- [ ] 检查 `SemanticGraph` 中每个非 root 节点都有 parent。
-- [ ] 检查主要 joint 节点都有 axis、frame 和可用于几何生成的 span 信息。
 - [ ] 检查四足机器人四条腿镜像关系。
-- [ ] 检查 visual 不能全部是 primitive。
-- [ ] 检查主要 link 是否缺少 visual mesh。
-- [ ] 检查主要 revolute joint 附近是否生成 mesh-backed visual。
 - [ ] 检查 T-joint 的 branch 方向是否接近对应 child span。
-- [ ] 检查 mesh visual 不跨越会相对运动的 joint。
-- [ ] 检查 wrist 不能全部塌成一个 link。
+- [ ] 整合 Phase 5 的 graph / geometry checks 到 `compile_robot_model` 或新增 probe 工具报告。
 
 ### Phase 8：扩展 robot_sdk 插件
 
