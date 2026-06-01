@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -53,6 +54,20 @@ class _FakeTools:
         )
 
 
+class _SlowTools:
+    def __init__(self, delay: float = 0.2) -> None:
+        self.delay = delay
+
+    def call(self, tool_name: str, params: dict[str, Any]) -> str:
+        time.sleep(self.delay)
+        query = params["query"]
+        return (
+            f"1. {query}\n"
+            f"   链接: https://example.com/{query}\n"
+            f"   摘要: {query} summary"
+        )
+
+
 class SearchAgentTest(unittest.TestCase):
     def test_expands_queries_searches_and_filters_results(self) -> None:
         llm = _ScriptedLLM(
@@ -80,6 +95,17 @@ class SearchAgentTest(unittest.TestCase):
         )
         self.assertIn("https://platform.openai.com/docs/api-reference/chat/create", result.final_answer)
         self.assertNotIn("https://example.com/unrelated", result.final_answer)
+
+    def test_search_queries_run_concurrently(self) -> None:
+        llm = _ScriptedLLM(["{}"])
+        agent = SearchAgent(llm=llm, tools=_SlowTools(delay=0.2))
+
+        start = time.perf_counter()
+        out = agent._search_queries_concurrently(["a", "b", "c"], max_results=1)
+        elapsed = time.perf_counter() - start
+
+        self.assertEqual([query for query, _raw in out], ["a", "b", "c"])
+        self.assertLess(elapsed, 0.45)
 
 
 if __name__ == "__main__":

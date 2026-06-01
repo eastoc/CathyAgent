@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any, TypedDict
@@ -113,9 +114,8 @@ class SearchAgent(Subagent):
     name = "search_agent"
     description = (
         "搜索子 agent。用于需要联网搜索、事实核对、新闻/文档查询的问题。"
-        "它会先根据用户问题自主扩写多个 query，批量调用 web_search，"
+        "它会先根据用户问题自主扩写多个 query，批量搜索，"
         "再根据网页摘要与问题的相关性筛选出应返回的网页。"
-        "主 agent 需要搜索时应调用本工具，而不是直接调用 web_search。"
     )
     input_schema = {
         "type": "object",
@@ -199,11 +199,8 @@ class SearchAgent(Subagent):
         candidates: list[dict[str, str]] = []
         errors: list[str] = []
         max_results = int(state["max_results_per_query"])
-        for query in state.get("queries") or [state["question"]]:
-            raw = self.tools.call(
-                "web_search",
-                {"query": query, "max_results": max_results},
-            )
+        queries = state.get("queries") or [state["question"]]
+        for query, raw in self._search_queries_concurrently(queries, max_results=max_results):
             _trace(state, "web_search", {"query": query, "result": raw})
             if raw.startswith("[ToolError"):
                 errors.append(f"- `{query}`: {raw}")
@@ -212,6 +209,23 @@ class SearchAgent(Subagent):
         state["candidates"] = candidates
         state["errors"] = errors
         return state
+
+    def _search_queries_concurrently(self, queries: list[str], *, max_results: int) -> list[tuple[str, str]]:
+        return asyncio.run(self._search_queries_async(queries, max_results=max_results))
+
+    async def _search_queries_async(self, queries: list[str], *, max_results: int) -> list[tuple[str, str]]:
+        async def run_one(query: str) -> tuple[str, str]:
+            try:
+                raw = await asyncio.to_thread(
+                    self.tools.call,
+                    "web_search",
+                    {"query": query, "max_results": max_results},
+                )
+                return query, str(raw)
+            except Exception as exc:
+                return query, f"[ToolError:web_search] {type(exc).__name__}: {exc}"
+
+        return await asyncio.gather(*(run_one(query) for query in queries))
 
     def _node_select_relevant(self, state: SearchState) -> SearchState:
         candidates = state.get("candidates") or []
