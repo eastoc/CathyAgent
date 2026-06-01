@@ -300,11 +300,12 @@ CathyAgent/
   skills/
     summarize/SKILL.md
     write_blog/SKILL.md
+  docs/                       # 开发文档
+    ROADMAP.md
+    ARCHITECTURE.md
   data/                       # SQLite db（gitignored）
   log/                        # 运行日志（gitignored）
   tests/                      # unittest 套件
   main.py                     # python main.py 入口
   requirements.txt
-  ROADMAP.md
-  ARCHITECTURE.md
 ```

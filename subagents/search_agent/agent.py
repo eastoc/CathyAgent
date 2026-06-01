@@ -130,13 +130,13 @@ class SearchAgent(Subagent):
             "max_queries": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 6,
-                "description": "最多扩写出的搜索 query 数，默认 4。",
+                "maximum": 3,
+                "description": "最多扩写出的搜索 query 数，默认 3。",
             },
             "max_results_per_query": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 10,
+                "maximum": 5,
                 "description": "每个 query 返回的搜索结果数，默认 5。",
             },
         },
