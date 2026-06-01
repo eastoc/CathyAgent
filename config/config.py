@@ -125,6 +125,7 @@ def load_config(path: Path | str | None = None) -> dict:
 
 
 def _llm_provider_entries(cfg: dict) -> dict[str, dict]:
+    # 返回所有 LLM provider条目的字典（过滤掉元信息键，只保留dict类型）。
     llm_section = cfg.get("LLM")
     if not isinstance(llm_section, dict):
         return {}
@@ -208,8 +209,15 @@ def get_llm(
         return resolved
 
     entries = cfg.get("LLM_API") or []
+    selected = provider or name
+    if not selected:
+        if not role:
+            try:
+                selected = get_llm_provider(cfg)
+            except ValueError:
+                selected = None
     for entry in entries:
-        if name and entry.get("name") != name:
+        if selected and entry.get("name") != selected:
             continue
         if role and role not in (entry.get("roles") or []):
             continue

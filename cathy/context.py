@@ -5,12 +5,13 @@
 
 层级（从静态到动态）：
 
-  1. SYSTEM   —— 内置角色 / 工具调用规则 / 回答风格（DEFAULT_SYSTEM_PROMPT）
+  1. SYSTEM   —— 内置角色 / 通用工具调用规则 / 回答风格（DEFAULT_SYSTEM_PROMPT）
   2. PROJECT  —— 项目级规则，自动读取 AGENTS.md / CATHY.md
-  3. SKILL    —— 当前激活的 Skill 内容（Phase 3 起接入）
-  4. EXTRA    —— 用户在 config.yaml / CLI 临时附加的指令
-  5. SESSION  —— 历史消息（来自 SQLite，Phase 2 起接入）
-  6. SCRATCHPAD —— 当前任务工具结果（Phase 3 起做"对外摘要 vs 内部全量"分离）
+  3. TOOL     —— 当前已加载工具目录（由插件 / subagent manifest 自动生成）
+  4. SKILL    —— 当前激活的 Skill 内容（Phase 3 起接入）
+  5. EXTRA    —— 用户在 config.yaml / CLI 临时附加的指令
+  6. SESSION  —— 历史消息（来自 SQLite，Phase 2 起接入）
+  7. SCRATCHPAD —— 当前任务工具结果（Phase 3 起做"对外摘要 vs 内部全量"分离）
 
 对外接口：
 - build_system_prompt(...): 仅返回 system 层（向下兼容旧调用方）。
@@ -37,26 +38,6 @@ DEFAULT_SYSTEM_PROMPT = """\
 3. 同一信息可由多个工具获取时，优先选择最直接、副作用最小的工具。
 4. 工具失败时阅读错误信息并自适应：换参数、换工具、或如实告知用户。
 
-## 工具能力概览
-
-- `web_search`：联网搜索最新信息（新闻、事实核对、文档）。
-- `read_file` / `list_dir` / `write_file`：本地文件操作，限当前工作目录子树。
-- `get_current_datetime`：获取当前系统时间。涉及"今天/现在/星期几/N 天后"等时间问题时必须调用。
-- `read_skill`：按名读取 SKILL.md 全文。当任务匹配下面"可用 Skills"目录里的某条时调用。
-- `planner_executor`：把一个**复杂、多步骤**的子任务派给规划-执行子 agent。
-
-其它工具会通过 OpenAI tool schema 自动注入，请按其 description 与 input_schema 调用。
-
-## 何时调 `planner_executor`（关键决策点）
-
-简单任务直接自己用 ReAct 完成；只有当任务**同时**满足以下 ≥2 项时才考虑派给子 agent：
-- 需要先做计划再分步执行（不是单步可解）；
-- 中间产物长、留在主上下文会污染后续对话；
-- 步骤之间相对独立，可以拆。
-
-派出时入参 `goal` 必须包含**完整背景**（子 agent 看不到本会话历史）。
-子 agent 返回的是凝练后的 `final_answer`，请把它整合进给用户的回答。
-
 ## Skills 使用约定
 
 - system prompt 末尾的"可用 Skills"列出了所有可加载的指令模板（只有 name + 一句描述）。
@@ -80,6 +61,7 @@ class ContextLayers:
 
     system: str = ""
     project: str = ""
+    tool_catalog: str = ""
     skill_catalog: str = ""
     extra: str = ""
 
@@ -89,6 +71,8 @@ class ContextLayers:
             parts.append(self.system.strip())
         if self.project:
             parts.append("## 项目级规则（来自 AGENTS.md / CATHY.md）\n\n" + self.project.strip())
+        if self.tool_catalog:
+            parts.append(self.tool_catalog.strip())
         if self.skill_catalog:
             parts.append(self.skill_catalog.strip())
         if self.extra:
@@ -112,6 +96,7 @@ def build_system_prompt(
     *,
     project_root: Path | None = None,
     system_override: str | None = None,
+    tool_catalog: str = "",
     skill_catalog: str = "",
     extra: str = "",
 ) -> str:
@@ -120,12 +105,14 @@ def build_system_prompt(
     Args:
         project_root: 项目根目录；提供时会尝试读取 AGENTS.md / CATHY.md。
         system_override: 完整替换内置默认 SYSTEM 层（罕用）。
+        tool_catalog: 由当前工具注册表生成的工具目录字符串。
         skill_catalog: 由 build_skill_catalog 生成的 skill 目录字符串（不含正文）。
         extra: 临时附加指令（来自 config.yaml 的 AGENT.extra_system 或 CLI 参数）。
     """
     layers = ContextLayers(
         system=(system_override if system_override is not None else DEFAULT_SYSTEM_PROMPT),
         project=load_project_rules(project_root) if project_root else "",
+        tool_catalog=tool_catalog,
         skill_catalog=skill_catalog,
         extra=extra,
     )
@@ -156,13 +143,17 @@ class ContextAssembler:
         self,
         *,
         project_root: Path | None = None,
+        tool_catalog: str = "",
         skill_catalog: str = "",
         extra: str = "",
         token_budget: int = 8000,
         hooks: "HookManager | None" = None,
     ) -> None:
         self.system_prompt = build_system_prompt(
-            project_root=project_root, skill_catalog=skill_catalog, extra=extra,
+            project_root=project_root,
+            tool_catalog=tool_catalog,
+            skill_catalog=skill_catalog,
+            extra=extra,
         )
         self.token_budget = max(256, int(token_budget))
         self.hooks = hooks  # 仅 PreCompact 用；None 等价于无 hook

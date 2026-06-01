@@ -25,8 +25,8 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from .base import Subagent, SubagentResult
-from .runner import SubagentRunner
+from cathy.subagent import Subagent, SubagentResult
+from cathy.subagent.runner import SubagentRunner
 
 # ToolView is consumed via the duck-typed `tools` parameter; no import needed here.
 

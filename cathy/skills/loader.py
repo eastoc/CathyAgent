@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ..logger import get_logger
 from .manifest import SkillError, SkillSpec, parse_skill_md
+
+logger = get_logger(__name__)
 
 
 def discover_skills(roots: list[Path]) -> list[SkillSpec]:
@@ -26,10 +29,10 @@ def discover_skills(roots: list[Path]) -> list[SkillSpec]:
             try:
                 spec = parse_skill_md(md)
             except SkillError as exc:
-                print(f"[skill][skip] {md}: {exc}")
+                logger.warning("[skill][skip] %s: %s", md, exc)
                 continue
             if spec.name in seen:
-                print(f"[skill][skip] {md}: 同名 skill 已存在: {spec.name}")
+                logger.warning("[skill][skip] %s: 同名 skill 已存在: %s", md, spec.name)
                 continue
             seen.add(spec.name)
             found.append(spec)

@@ -16,8 +16,11 @@ from typing import Any, Iterable
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 
+from ..logger import get_logger
 from .base import PluginError, ToolPlugin
 from .manifest import LoadedPlugin, PluginManifest, ToolSpec, parse_manifest
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,34 @@ class ToolDescriptor:
     description: str
     plugin: str
     trust_level: str
+
+
+def build_tool_catalog(tools: Iterable[ToolDescriptor]) -> str:
+    """把当前已注册工具压缩成 system prompt 用的目录字符串。
+
+    设计与 skills catalog 一致：只放 name + manifest description，不放 schema 细节；
+    schema 会通过 OpenAI tool schema 单独注入。
+    """
+    items = sorted(list(tools), key=lambda t: (t.plugin, t.name))
+    if not items:
+        return ""
+
+    lines = [
+        "## 工具能力概览（自动注入）",
+        "",
+        "以下工具来自当前已加载插件 / 子 agent；参数与约束以 OpenAI tool schema 为准。",
+    ]
+    current_plugin = ""
+    for tool in items:
+        if tool.plugin != current_plugin:
+            current_plugin = tool.plugin
+            lines.append("")
+            lines.append(f"### {current_plugin}")
+        desc = " ".join(str(tool.description or "").split())
+        trust = f"，trust={tool.trust_level}" if tool.trust_level else ""
+        suffix = f"（plugin={tool.plugin}{trust}）"
+        lines.append(f"- `{tool.name}`：{desc}{suffix}")
+    return "\n".join(lines)
 
 
 class PluginRegistry:
@@ -57,7 +88,7 @@ class PluginRegistry:
                     self._load_plugin_dir(manifest_path)
                     loaded_names.append(child.name)
                 except PluginError as exc:
-                    print(f"[plugin][skip] {child.name}: {exc}")
+                    logger.warning("[plugin][skip] %s: %s", child.name, exc)
         return loaded_names
 
     def _load_plugin_dir(self, manifest_path: Path) -> None:
@@ -169,7 +200,7 @@ class PluginRegistry:
             try:
                 loaded.instance.shutdown()
             except Exception as exc:
-                print(f"[plugin][shutdown] {loaded.manifest.name}: {exc}")
+                logger.warning("[plugin][shutdown] %s: %s", loaded.manifest.name, exc)
 
     def attach_session(self, session_id: str) -> None:
         """把运行时 session 上下文广播给支持 attach_session 的插件。
@@ -188,7 +219,7 @@ class PluginRegistry:
                 try:
                     fn(sid)
                 except Exception as exc:
-                    print(f"[plugin][attach_session] {loaded.manifest.name}: {exc}")
+                    logger.warning("[plugin][attach_session] %s: %s", loaded.manifest.name, exc)
 
     # -------- 运行时插件注入（不走磁盘扫描） -------- #
 
@@ -259,6 +290,14 @@ class ToolView:
 
     def list_tools(self) -> list[ToolDescriptor]:
         return [d for d in self._registry.list_tools() if self._is_visible(d.name)]
+
+    def get_tool_descriptor(self, tool_name: str) -> ToolDescriptor | None:
+        if not self._is_visible(tool_name):
+            return None
+        return self._registry.get_tool_descriptor(tool_name)
+
+    def attach_session(self, session_id: str) -> None:
+        self._registry.attach_session(session_id)
 
 
 def _instantiate_plugin(manifest: PluginManifest) -> ToolPlugin:

@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cathy.cli import build_runtime  # noqa: E402
-from cathy.subagent import planner_executor as pe_mod  # noqa: E402
+from subagents.planner_executor import agent as pe_mod  # noqa: E402
 
 
 def _patch_progress() -> None:

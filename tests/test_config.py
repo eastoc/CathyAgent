@@ -99,6 +99,18 @@ class LlmConfigTest(unittest.TestCase):
         llm = get_llm(cfg, name="deepseek")
         self.assertEqual(llm["model"], "deepseek-chat")
 
+    def test_legacy_llm_api_respects_selected_provider(self) -> None:
+        cfg = {
+            "LLM": {"provider": "deepseek"},
+            "LLM_API": [
+                {"name": "openai", "model": "gpt-4o-mini", "api_key": ""},
+                {"name": "deepseek", "model": "deepseek-chat", "api_key": "ds-key"},
+            ],
+        }
+        llm = get_llm(cfg)
+        self.assertEqual(llm["name"], "deepseek")
+        self.assertEqual(llm["api_key"], "ds-key")
+
     def test_load_config_expands_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

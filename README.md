@@ -1,6 +1,6 @@
 # CathyAgent
 
-借鉴 Claude Code 设计哲学的本地 Agent harness。详细架构见 `ARCHITECTURE.md`，分阶段路线图见 `ROADMAP.md`。
+本地Agent harness内核，我们正在尝试构建Robot CAD Agent，旨在Agent自主完成机器人的设计、CAD建模和运动仿真。 
 
 ## 快速开始
 
@@ -13,7 +13,7 @@ pip install -r requirements.txt
 
 ### 2. 配置密钥
 
-`config/.env` 已包含示例 key（仅本地开发，已被 `.gitignore` 忽略）。如需替换：
+`config/.env` 已包含示例 key。如需替换：
 
 ```env
 DEEPSEEK_API_KEY=sk-...
@@ -61,7 +61,7 @@ python -m cathy
 | **MCP 权限治理**（`PERMISSION.mcp_rules`：deny/ask/allow） | ✅ |
 | iMessage / 远端 Linux Agent | 见 `ROADMAP.md`，后续 Phase 实现 |
 
-## Skill 与 Subagent 是两件事
+## Skill 与 Subagent
 
 | 维度 | Skill（能力模板） | Subagent（子代理实例） |
 |---|---|---|
@@ -82,7 +82,7 @@ python -m cathy
 | `planner_executor` | `planner_executor` | LangGraph 实现的 plan-execute-replan 子 agent |
 | `mcp`（运行时注入） | `mcp__<server>__<tool>` | 外部 MCP 生态工具（FastMCP Client 聚合） |
 
-## MCP 与权限治理（Phase 5.1）
+## MCP 与权限治理
 
 - MCP 启动入口在 `config/config.yaml` 的 `MCP` 段，支持本地 stdio 与远端服务。
 - roots 语义：filesystem server 会请求 client roots，当前实现会把路径规范为 `file://...` URI，避免 `url_parsing` 报错。

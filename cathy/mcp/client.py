@@ -16,13 +16,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import re
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-logger = logging.getLogger(__name__)
+from ..logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def normalize_root_uri(value: str) -> str:

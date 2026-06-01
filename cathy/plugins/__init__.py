@@ -8,7 +8,7 @@
 
 from .base import PluginError, ToolPlugin
 from .manifest import Execution, PluginManifest, ToolSpec
-from .registry import PluginRegistry, ToolDescriptor, ToolView
+from .registry import PluginRegistry, ToolDescriptor, ToolView, build_tool_catalog
 
 __all__ = [
     "Execution",
@@ -19,4 +19,5 @@ __all__ = [
     "ToolPlugin",
     "ToolSpec",
     "ToolView",
+    "build_tool_catalog",
 ]

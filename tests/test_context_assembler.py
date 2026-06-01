@@ -84,7 +84,12 @@ class ContextAssemblerTest(unittest.TestCase):
     def test_build_system_prompt_backward_compat(self) -> None:
         s = build_system_prompt()
         self.assertIn("Cathy", s)
+        self.assertNotIn("web_search", s)
+
+    def test_tool_catalog_injected_when_provided(self) -> None:
+        s = build_system_prompt(tool_catalog="## 工具能力概览（自动注入）\n\n- `demo`: 示例工具")
         self.assertIn("工具能力概览", s)
+        self.assertIn("demo", s)
 
 
 if __name__ == "__main__":

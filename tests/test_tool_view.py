@@ -90,6 +90,11 @@ class ToolViewTest(unittest.TestCase):
         out = view.call("alpha", {})  # 缺 msg → schema 校验失败
         self.assertTrue(out.startswith("[ToolError:alpha]"))
 
+    def test_view_hides_blocked_descriptor(self) -> None:
+        view = ToolView(self.reg, blocked=["beta"])
+        self.assertIsNone(view.get_tool_descriptor("beta"))
+        self.assertIsNotNone(view.get_tool_descriptor("alpha"))
+
 
 if __name__ == "__main__":
     unittest.main()

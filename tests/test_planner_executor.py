@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from cathy.plugins.base import ToolPlugin  # noqa: E402
 from cathy.plugins.manifest import Execution, PluginManifest, ToolSpec  # noqa: E402
 from cathy.plugins.registry import PluginRegistry, ToolView  # noqa: E402
-from cathy.subagent.planner_executor import (  # noqa: E402
+from subagents.planner_executor.agent import (  # noqa: E402
     PlannerExecutorSubagent,
     _parse_plan,
     _parse_replan_json,

@@ -7,6 +7,45 @@ from typing import Any
 from openai import OpenAI
 
 
+def _normalize_model(model: str) -> str:
+    return (model or "").strip().lower()
+
+
+def uses_max_completion_tokens(model: str) -> bool:
+    """OpenAI 新模型 / reasoning 模型使用 max_completion_tokens。"""
+    m = _normalize_model(model)
+    return (
+        m.startswith("gpt-5")
+        or m.startswith("o1")
+        or m.startswith("o3")
+        or m.startswith("o4")
+    )
+
+
+def supports_configurable_temperature(model: str) -> bool:
+    """部分 OpenAI 新模型只支持默认 temperature，不应显式传入。"""
+    m = _normalize_model(model)
+    return not (
+        m.startswith("gpt-5")
+        or m.startswith("o1")
+        or m.startswith("o3")
+        or m.startswith("o4")
+    )
+
+
+def apply_token_limit(kwargs: dict[str, Any], *, model: str, max_tokens: int | None) -> None:
+    if not max_tokens:
+        return
+    key = "max_completion_tokens" if uses_max_completion_tokens(model) else "max_tokens"
+    kwargs[key] = max_tokens
+
+
+def apply_temperature(kwargs: dict[str, Any], *, model: str, temperature: float | None) -> None:
+    if temperature is None or not supports_configurable_temperature(model):
+        return
+    kwargs["temperature"] = temperature
+
+
 class LLMClient:
     """对 openai.OpenAI 的薄封装，统一注入 model / 默认参数。"""
 
@@ -37,10 +76,9 @@ class LLMClient:
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": self.temperature,
         }
-        if self.max_tokens:
-            kwargs["max_tokens"] = self.max_tokens
+        apply_temperature(kwargs, model=self.model, temperature=self.temperature)
+        apply_token_limit(kwargs, model=self.model, max_tokens=self.max_tokens)
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice or "auto"

@@ -1,8 +1,8 @@
 # LLM：provider + 通用推理参数；各供应商连接信息见 config/llm/<name>.yaml
 LLM:
-  provider: deepseek
+  provider: openai
   temperature: 0.7
-  max_tokens: 300000
+  max_tokens: 128000
   roles:
     - planner
     - executor
@@ -18,7 +18,7 @@ AGENT:
 
 SESSION:
   db_path: data/sessions.db
-  token_budget: 200000      # 历史消息硬截断的 token 预算（字符数/4 估算）
+  token_budget: 300000      # 历史消息硬截断的 token 预算（字符数/4 估算）
 
 # MCP（Model Context Protocol）外部工具生态：
 # - 形态对齐 Claude Code 的 mcpServers：本地 stdio 用 command/args/env；
