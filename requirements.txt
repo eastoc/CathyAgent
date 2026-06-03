@@ -7,3 +7,4 @@ py-sandboxrt>=0.2.0
 fastmcp>=2.0.0
 mcp-server-time>=2026.1.0
 cadquery
+numpy==2.2.6

@@ -40,6 +40,7 @@ from .skills import (  # noqa: E402
 )
 from .subagent import SubagentToolPlugin, build_subagent_tool_manifest  # noqa: E402
 from subagents.planner_executor import PlannerExecutorSubagent  # noqa: E402
+from subagents.robot_design_agent import RobotDesignAgent  # noqa: E402
 from subagents.search_agent import SearchAgent  # noqa: E402
 
 
@@ -68,9 +69,7 @@ def _build_plugin_configs(cfg: dict) -> dict[str, dict]:
     tavily_key = cfg.get("TAVILY_API_KEY") or os.environ.get("TAVILY_API_KEY", "")
     has_tavily = bool(tavily_key) and "${" not in str(tavily_key)
     sandbox_cfg = cfg.get("SANDBOX") or {}
-    workspace_root = Path(sandbox_cfg.get("workspace_root") or "workspaces")
-    if not workspace_root.is_absolute():
-        workspace_root = _PROJECT_ROOT / workspace_root
+    workspace_root = _resolve_workspace_root(cfg)
     return {
         "web_search": {"api_key": tavily_key} if has_tavily else {},
         "file_ops": {
@@ -87,6 +86,14 @@ def _build_plugin_configs(cfg: dict) -> dict[str, dict]:
             "allowed_domains": list((sandbox_cfg.get("network") or {}).get("allowed_domains") or []),
         },
     }
+
+
+def _resolve_workspace_root(cfg: dict) -> Path:
+    sandbox_cfg = cfg.get("SANDBOX") or {}
+    workspace_root = Path(sandbox_cfg.get("workspace_root") or "workspaces")
+    if not workspace_root.is_absolute():
+        workspace_root = _PROJECT_ROOT / workspace_root
+    return workspace_root
 
 
 def _resolve_db_path(cfg: dict) -> Path:
@@ -246,7 +253,19 @@ def build_runtime(cfg: dict | None = None) -> tuple[Agent, SessionStore, HookMan
 
     # ---- Subagent：planner_executor（LangGraph） ----
     # 子 agent 内部能用：除 planner_executor 自身和裸 web_search 以外的所有工具。
-    subagent_tool_view = ToolView(registry, blocked={"planner_executor", "web_search"})
+    subagent_tool_view = ToolView(
+        registry,
+        blocked={"planner_executor", "robot_design_agent", "web_search"},
+    )
+
+    # ---- Subagent：robot_design_agent（固定 Robot CAD MVP 流程） ----
+    robot_design_agent = RobotDesignAgent(workspace_root=_resolve_workspace_root(cfg))
+    registry.register_internal_plugin(
+        build_subagent_tool_manifest(robot_design_agent),
+        SubagentToolPlugin(robot_design_agent, hooks=hooks),
+    )
+    logger.info("[subagents] exposed: robot_design_agent")
+
     planner_executor = PlannerExecutorSubagent(llm=llm, tools=subagent_tool_view)
     registry.register_internal_plugin(
         build_subagent_tool_manifest(planner_executor),

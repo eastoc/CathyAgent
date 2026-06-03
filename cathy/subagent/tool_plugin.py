@@ -51,8 +51,11 @@ class SubagentToolPlugin(ToolPlugin):
         return None
 
     def attach_session(self, session_id: str) -> None:
-        """父 agent 在会话开始后调用一次，让子 agent 的 hook 事件能回填 session_id。"""
+        """父 agent 在会话开始后调用一次，让子 agent 和 hook 事件拿到 session_id。"""
         self._session_id = session_id or ""
+        attach = getattr(self._subagent, "attach_session", None)
+        if callable(attach):
+            attach(self._session_id)
 
     def execute(self, tool_name: str, params: dict[str, Any]) -> str:
         if tool_name != self._subagent.name:
