@@ -159,6 +159,16 @@ class SkillManifestTest(unittest.TestCase):
         self.assertIn("`bravo`", cat)
         self.assertEqual(build_skill_catalog([]), "")
 
+    def test_project_robot_cad_design_skill_is_discoverable(self) -> None:
+        specs = discover_skills([PROJECT_ROOT / "skills"])
+        by_name = {spec.name: spec for spec in specs}
+
+        self.assertIn("robot_cad_design", by_name)
+        spec = by_name["robot_cad_design"]
+        self.assertIn("机器人 CAD 设计方法论", spec.description)
+        self.assertIn("robot_design_agent", spec.body)
+        self.assertIn("MechanicalLayout", spec.body)
+
 
 if __name__ == "__main__":
     unittest.main()

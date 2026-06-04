@@ -25,6 +25,7 @@ class CadQueryAssemblyResult:
     part_catalog: CadQueryPartCatalog
     constraint_calls: list[CadQueryConstraintCall]
     solved: bool
+    part_locations: dict[str, Any] = field(default_factory=dict)
     solve_error: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -81,6 +82,7 @@ def build_cadquery_assembly(
         assembly=assembly,
         part_catalog=part_catalog,
         constraint_calls=constraint_calls,
+        part_locations=placements,
         solved=solved,
         solve_error=solve_error,
         metadata={

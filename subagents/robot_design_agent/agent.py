@@ -21,7 +21,11 @@ from typing import Any
 
 from cathy.subagent import Subagent, SubagentResult
 from robot_sdk.cad.cq_assembly import build_cadquery_assembly
-from robot_sdk.cad.export import CadQueryExportResult, export_step
+from robot_sdk.cad.export import (
+    CadQueryExportResult,
+    CadQueryStepPackageExportResult,
+    export_robot_step_package,
+)
 from robot_sdk.layout.mechanical_layout import build_tabletop_serial_mechanical_layout
 from robot_sdk.types import (
     DHParam,
@@ -32,6 +36,7 @@ from robot_sdk.types import (
     RobotRequirement,
 )
 from robot_sdk.validation.basic import RobotDesignValidationReport, validate_robot_design
+from subagents.robot_design_agent.rules import build_cad_export_subassembly_specs
 
 
 DEFAULT_DOF = 4
@@ -52,9 +57,10 @@ class RobotDesignAgent(Subagent):
 
     name = "robot_design_agent"
     description = (
-        "机器人 CAD 设计子 agent。用于把用户的机器人设计需求跑成一个 MVP 闭环："
-        "需求解析、简单 DH/KinematicModel、MechanicalLayout、CadQuery 粗 CAD、"
-        "Assembly.solve、STEP 导出和基础验证报告。第一版是固定流程，不拆多个子 agent。"
+        "机器人 CAD 执行型子 agent。用于在已经明确要生成 CAD/STEP 时，"
+        "把机器人设计需求跑成一个 MVP 闭环：需求解析、简单 DH/KinematicModel、"
+        "MechanicalLayout、CadQuery 粗 CAD、STEP 导出和基础验证报告。"
+        "设计方法论和审查清单由 robot_cad_design skill 提供。"
     )
     input_schema = {
         "type": "object",
@@ -88,7 +94,7 @@ class RobotDesignAgent(Subagent):
             },
             "export_filename": {
                 "type": "string",
-                "description": "可选：STEP 文件名，默认 robot_mvp.step。",
+                "description": "可选：整机 STEP 文件名，默认 整机.step。",
             },
             "solve": {
                 "type": "boolean",
@@ -159,6 +165,21 @@ class RobotDesignAgent(Subagent):
                 workspace_root=self._workspace_root,
                 session_id=self._session_id,
             )
+            requirement_doc_path = _write_requirement_document(
+                output_path.parent,
+                requirement=requirement,
+                kinematic_model=kinematic_model,
+                assumptions=parsed.assumptions,
+                warnings=parsed.warnings,
+            )
+            trace.append(
+                {
+                    "type": "requirement_document",
+                    "path": str(requirement_doc_path),
+                    "exists": requirement_doc_path.exists(),
+                }
+            )
+
             cad_result = build_cadquery_assembly(
                 layout,
                 cq_module=self._cq_module,
@@ -176,14 +197,33 @@ class RobotDesignAgent(Subagent):
             )
 
             export_result: CadQueryExportResult | None = None
+            package_result: CadQueryStepPackageExportResult | None = None
             if cad_result.solved or not bool(params.get("solve", False)):
-                export_result = export_step(cad_result.assembly, output_path)
+                package_result = export_robot_step_package(
+                    cad_result,
+                    output_path.parent,
+                    whole_machine_filename=output_path.name,
+                    subassemblies=build_cad_export_subassembly_specs(cad_result),
+                )
+                export_result = package_result.whole_machine_export
                 trace.append(
                     {
                         "type": "export",
-                        "path": str(export_result.path),
+                        "root_dir": str(package_result.root_dir),
+                        "whole_machine_path": str(export_result.path),
                         "exists": export_result.exists,
                         "size_bytes": export_result.size_bytes,
+                        "file_count": package_result.file_count,
+                        "subassemblies": [
+                            {
+                                "name": item.name,
+                                "directory": str(item.directory),
+                                "part_ids": item.part_ids,
+                                "assembly_path": str(item.assembly_export.path),
+                                "part_paths": [str(part.path) for part in item.part_exports],
+                            }
+                            for item in package_result.subassemblies
+                        ],
                     }
                 )
 
@@ -211,8 +251,10 @@ class RobotDesignAgent(Subagent):
                     kinematic_model=kinematic_model,
                     layout=layout,
                     output_path=output_path,
+                    requirement_doc_path=requirement_doc_path,
                     cad_result=cad_result,
                     export_result=export_result,
+                    package_result=package_result,
                     report=report,
                     assumptions=parsed.assumptions,
                 ),
@@ -371,16 +413,28 @@ def _format_final_answer(
     kinematic_model: KinematicModel,
     layout: MechanicalLayout,
     output_path: Path,
+    requirement_doc_path: Path,
     cad_result: Any,
     export_result: CadQueryExportResult | None,
+    package_result: CadQueryStepPackageExportResult | None,
     report: RobotDesignValidationReport,
     assumptions: list[str],
 ) -> str:
     status = "通过" if report.ok else "未通过"
     export_line = (
-        f"- STEP: {export_result.path} ({export_result.size_bytes} bytes)"
+        f"- Whole machine STEP: {export_result.path} ({export_result.size_bytes} bytes)"
         if export_result and export_result.exists
         else f"- STEP: 未导出，目标路径 {output_path}"
+    )
+    package_line = (
+        f"- STEP package: {package_result.root_dir} ({package_result.file_count} files)"
+        if package_result
+        else "- STEP package: 未导出"
+    )
+    subassembly_line = (
+        f"- Subassemblies: {len(package_result.subassemblies)}"
+        if package_result
+        else "- Subassemblies: 0"
     )
     assumptions_text = "\n".join(f"- {item}" for item in assumptions) or "- 无额外假设"
     error_text = "\n".join(f"- {msg}" for msg in report.messages("error")) or "- 无"
@@ -396,10 +450,13 @@ def _format_final_answer(
         f"- 工作半径: {requirement.reach:g} {requirement.reach_unit}\n"
         f"- DH link lengths: {link_lengths}\n\n"
         "## CAD 结果\n"
+        f"- Requirement document: {requirement_doc_path}\n"
         f"- Parts: {cad_result.part_count}\n"
         f"- Constraints: {cad_result.constraint_count}\n"
         f"- Assembly placement: {cad_result.metadata.get('placement_mode', 'unknown')}\n"
         f"- Assembly.solve: {'成功' if cad_result.solved else '未执行（MVP 默认不让欠约束 solver 重排零件）'}\n"
+        f"{package_line}\n"
+        f"{subassembly_line}\n"
         f"{export_line}\n\n"
         "## MechanicalLayout\n"
         f"- Frames: {len(layout.frames)}\n"
@@ -411,6 +468,104 @@ def _format_final_answer(
         f"- Warnings:\n{warning_text}\n\n"
         "## 假设\n"
         f"{assumptions_text}"
+    )
+
+
+def _write_requirement_document(
+    output_dir: Path,
+    *,
+    requirement: RobotRequirement,
+    kinematic_model: KinematicModel,
+    assumptions: list[str],
+    warnings: list[str],
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "需求文档.md"
+    path.write_text(
+        _format_requirement_document(
+            requirement=requirement,
+            kinematic_model=kinematic_model,
+            assumptions=assumptions,
+            warnings=warnings,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _format_requirement_document(
+    *,
+    requirement: RobotRequirement,
+    kinematic_model: KinematicModel,
+    assumptions: list[str],
+    warnings: list[str],
+) -> str:
+    joint_rows = "\n".join(
+        "| {id} | {type} | {parent} | {child} | {lower:g}..{upper:g} |".format(
+            id=joint.id,
+            type=joint.type,
+            parent=joint.parent_link,
+            child=joint.child_link,
+            lower=joint.limit[0] if joint.limit else 0.0,
+            upper=joint.limit[1] if joint.limit else 0.0,
+        )
+        for joint in kinematic_model.joints
+    )
+    link_rows = "\n".join(
+        f"| {link.id} | {link.length:g} | {link.length_unit} | {link.parent_joint} | {link.material or ''} |"
+        for link in kinematic_model.links
+    )
+    dh_rows = "\n".join(
+        "| {joint_id} | {a:g} | {alpha:g} | {d:g} | {theta:g} | {joint_type} | {variable} |".format(
+            joint_id=param.joint_id,
+            a=param.a,
+            alpha=param.alpha,
+            d=param.d,
+            theta=param.theta,
+            joint_type=param.joint_type,
+            variable=param.variable or "",
+        )
+        for param in kinematic_model.dh_params
+    )
+    assumption_lines = "\n".join(f"- {item}" for item in assumptions) or "- 无"
+    warning_lines = "\n".join(f"- {item}" for item in warnings) or "- 无"
+    model_assumption_lines = "\n".join(
+        f"- {item}" for item in kinematic_model.assumptions
+    ) or "- 无"
+
+    return (
+        "# 机器人设计需求文档\n\n"
+        "## 设计需求\n"
+        f"- 原始需求: {requirement.task}\n"
+        f"- 推荐构型: {requirement.preferred_architecture}\n"
+        f"- 工作空间: {requirement.workspace}\n"
+        f"- 工作环境: {requirement.environment}\n"
+        f"- 安装方式: {requirement.mounting}\n\n"
+        "## 约束\n"
+        "| 约束项 | 值 | 单位 |\n"
+        "|---|---:|---|\n"
+        f"| DoF | {requirement.dof} | - |\n"
+        f"| Payload | {requirement.payload:g} | {requirement.payload_unit} |\n"
+        f"| Reach | {requirement.reach:g} | {requirement.reach_unit} |\n\n"
+        "## Joint Spec\n"
+        "| Joint | Type | Parent Link | Child Link | Limit(rad) |\n"
+        "|---|---|---|---|---|\n"
+        f"{joint_rows}\n\n"
+        "## Link Spec\n"
+        "| Link | Length | Unit | Parent Joint | Material |\n"
+        "|---|---:|---|---|---|\n"
+        f"{link_rows}\n\n"
+        "## DH 模型\n"
+        f"- Convention: {kinematic_model.convention}\n\n"
+        "| Joint | a(mm) | alpha(rad) | d(mm) | theta(rad) | Type | Variable |\n"
+        "|---|---:|---:|---:|---:|---|---|\n"
+        f"{dh_rows}\n\n"
+        "## 假设\n"
+        f"{assumption_lines}\n\n"
+        "## 运动学模型假设\n"
+        f"{model_assumption_lines}\n\n"
+        "## 警告\n"
+        f"{warning_lines}\n"
     )
 
 
@@ -431,7 +586,7 @@ def _output_path(
     else:
         output_dir = root / session_dir
 
-    filename = str(params.get("export_filename") or "robot_mvp.step").strip() or "robot_mvp.step"
+    filename = str(params.get("export_filename") or "整机.step").strip() or "整机.step"
     if not filename.lower().endswith((".step", ".stp")):
         filename = f"{filename}.step"
     return output_dir / filename

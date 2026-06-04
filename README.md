@@ -52,7 +52,7 @@ python -m cathy
 | 会话持久化（SQLite） + `--session` / `--list-sessions` | ✅ |
 | Token 预算硬截断（user 边界对齐） | ✅ |
 | **Skills**（静态模板 + `read_skill` 工具，progressive disclosure） | ✅ |
-| **Subagents**：`search_agent` / `planner_executor` 基于 LangGraph | ✅ |
+| **Subagents**：`search_agent` / `planner_executor` 基于 LangGraph，`robot_design_agent` 跑 Robot CAD MVP | ✅ |
 | **ToolView**（白/黑名单视图，限定子 agent 可用工具集） | ✅ |
 | **统一日志**：`cathy/logger.py`，日志写入项目根 `log/` | ✅ |
 | **Hooks 中间件**：8 类事件 + Python/Command 双后端，兼容 `.claude/settings.json` | ✅ |
@@ -70,7 +70,7 @@ python -m cathy
 | 在哪里 | `skills/<name>/SKILL.md` | `subagents/<name>/agent.py` |
 | 谁用 | 主 agent / 子 agent 都能加载 | 由父 agent 派任务 |
 | 怎么用 | 调 `read_skill(name)` 读取全文，按指示行事 | 直接调对应工具（如 `planner_executor`） |
-| 例子 | `summarize` / `write_blog` | `search_agent` / `planner_executor` |
+| 例子 | `summarize` / `write_blog` / `robot_cad_design` | `search_agent` / `planner_executor` / `robot_design_agent` |
 
 ## 内置插件清单
 
@@ -82,6 +82,7 @@ python -m cathy
 | `skills` | `read_skill` | 按名拉取一份 SKILL.md 全文（progressive disclosure） |
 | `search_agent` | `search_agent` | LangGraph 搜索子 agent：扩写 query、调用 `web_search`、筛选相关网页 |
 | `planner_executor` | `planner_executor` | LangGraph 实现的 plan-execute-replan 子 agent |
+| `robot_design_agent` | `robot_design_agent` | 机器人 CAD 执行型子 agent：需求解析、运动学模型、MechanicalLayout、CadQuery 粗 CAD、零件/子总成/整机 STEP 导出、验证报告 |
 | `mcp`（运行时注入） | `mcp__<server>__<tool>` | 外部 MCP 生态工具（FastMCP Client 聚合） |
 
 ## MCP 与权限治理
@@ -132,6 +133,7 @@ PERMISSION:
 示例 skill：
 - `skills/summarize/SKILL.md` —— 三段式中文摘要
 - `skills/write_blog/SKILL.md` —— 中文技术博客写作
+- `skills/robot_cad_design/SKILL.md` —— 机器人 CAD 设计方法论、调用边界和审查清单
 
 ## Subagent 工作机制
 
@@ -168,6 +170,39 @@ START → planner ──→ executor ──┬─── (plan 仍有步骤) ─�
 
 主 agent 何时该派给 `planner_executor`：任务**复杂、多步、中间产物长**；
 简单单步任务直接 ReAct 完成即可，不要无脑派出。
+
+### `robot_design_agent`
+
+`robot_design_agent` 是 Robot CAD MVP 的执行入口。主 agent 处理机器人 CAD 任务时，先按需读取 `robot_cad_design` skill 判断边界；如果用户要求生成 CAD / STEP / 跑建模闭环，再调用 `robot_design_agent`。
+
+当前固定流程：
+
+```
+request → RobotRequirement → KinematicModel/DH → MechanicalLayout → CadQuery Assembly → STEP package export → validation
+```
+
+- **Skill 负责**：需求拆解方法、DH 与 CAD 装配边界、审查清单、回答格式。
+- **Subagent 负责**：调用 `robot_sdk`、生成 `需求文档.md`、生成 CadQuery 粗 CAD、按 CAD naming rule 生成 `base/joint1/link1` 等 STEP package 目录、返回验证报告。
+- **SDK 负责**：确定性数据结构、DH/FK、layout、feature/constraint、CadQuery adapter、执行导出和校验；不拥有机器人命名策略。
+
+CAD 命名规则在 `subagents/robot_design_agent/rules.py`，例如 `J1 -> joint1`、`L1 -> link1`，并用 `joint1_housing.step` 这类零件名避免和 `joint1.step` 总成文件冲突。
+
+默认导出结构：
+
+```text
+session_id/
+  需求文档.md
+  base/
+    base_body.step
+    base.step
+  joint1/
+    joint1_housing.step
+    joint1.step
+  link1/
+    link1_body.step
+    link1.step
+  整机.step
+```
 
 ### 上下文隔离
 
