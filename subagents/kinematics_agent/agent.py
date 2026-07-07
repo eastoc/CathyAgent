@@ -15,6 +15,7 @@ from typing import Any
 
 from langgraph.graph import END, StateGraph
 
+from cathy.llm_errors import AgentFailure, LLMCallError
 from cathy.subagent import Subagent, SubagentResult
 from robot_sdk.kinematics.dh import estimate_reach
 from robot_sdk.kinematics.profiles import require_profile
@@ -94,9 +95,12 @@ class KinematicsAgent(Subagent):
         try:
             result = self.build_result(params)
         except Exception as exc:
+            failure = _subagent_failure(exc, stage="kinematics_agent")
             return SubagentResult(
                 final_answer=f"[kinematics_agent] 执行失败: {type(exc).__name__}: {exc}",
                 finished=False,
+                status="failed",
+                failure=failure,
                 trace=[
                     {
                         "type": "error",
@@ -108,6 +112,8 @@ class KinematicsAgent(Subagent):
         return SubagentResult(
             final_answer=_format_final_answer(result),
             finished=True,
+            status=result.status,
+            failure=result.failure,
             trace=result.trace,
         )
 
@@ -380,6 +386,8 @@ class KinematicsAgent(Subagent):
             assumptions=list(state.get("assumptions") or []),
             warnings=list(state.get("warnings") or []),
             trace=list(state.get("trace") or []),
+            status=str(state.get("status") or "ok"),
+            failure=state.get("failure"),
         )
         trace = [*result.trace, {"type": "finalize", "source_mode": result.source_mode}]
         result.trace = trace
@@ -650,6 +658,18 @@ def _format_final_answer(result: KinematicsAgentResult) -> str:
         f"{rows}\n\n"
         "## 警告\n"
         f"{warnings}"
+    )
+
+
+def _subagent_failure(exc: Exception, *, stage: str) -> AgentFailure:
+    if isinstance(exc, LLMCallError):
+        return exc.failure
+    return AgentFailure(
+        stage=stage,
+        error_type=type(exc).__name__,
+        reason="unknown",
+        retryable=False,
+        message=str(exc),
     )
 
 

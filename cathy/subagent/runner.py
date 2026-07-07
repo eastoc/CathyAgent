@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from typing import Any, Protocol
 
+from ..llm_errors import LLMCallError
 from .base import SubagentResult
 
 
@@ -75,7 +76,23 @@ class SubagentRunner:
         schemas = self.tools.openai_schemas() or None
 
         for step in range(self.max_steps):
-            response = self.llm.chat(messages, tools=schemas)
+            try:
+                response = _chat_with_optional_stage(
+                    self.llm,
+                    messages,
+                    tools=schemas,
+                    stage="subagent_runner",
+                )
+            except LLMCallError as exc:
+                result.final_answer = (
+                    f"[subagent] LLM 调用失败: {exc.failure.error_type}: "
+                    f"{exc.failure.message}"
+                )
+                result.finished = False
+                result.status = "failed"
+                result.failure = exc.failure
+                result.add("llm_error", {"step": step, "failure": exc.failure.to_dict()})
+                return result
             msg = response.choices[0].message
 
             if not msg.tool_calls:
@@ -126,5 +143,21 @@ class SubagentRunner:
 
         result.final_answer = f"[subagent] 已达到最大步数 {self.max_steps}，提前结束。"
         result.finished = False
+        result.status = "incomplete"
         result.add("max_steps", {"content": result.final_answer})
         return result
+
+
+def _chat_with_optional_stage(
+    llm: Any,
+    messages: list[dict[str, Any]],
+    *,
+    tools: list[dict] | None,
+    stage: str,
+) -> Any:
+    try:
+        return llm.chat(messages, tools=tools, stage=stage)
+    except TypeError as exc:
+        if "stage" not in str(exc):
+            raise
+        return llm.chat(messages, tools=tools)

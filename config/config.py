@@ -10,8 +10,28 @@ from typing import Any
 import yaml
 
 _ENV_PATTERN = re.compile(r"\$\{([^}]+)\}")
-_LLM_META_KEYS = frozenset({"provider", "config_dir", "temperature", "max_tokens", "roles"})
-_LLM_DEFAULT_KEYS = ("temperature", "max_tokens", "roles")
+_LLM_META_KEYS = frozenset(
+    {
+        "provider",
+        "config_dir",
+        "temperature",
+        "max_tokens",
+        "roles",
+        "timeout_sec",
+        "max_retries",
+        "retry_backoff_initial_sec",
+        "retry_backoff_max_sec",
+    }
+)
+_LLM_DEFAULT_KEYS = (
+    "temperature",
+    "max_tokens",
+    "roles",
+    "timeout_sec",
+    "max_retries",
+    "retry_backoff_initial_sec",
+    "retry_backoff_max_sec",
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = PROJECT_ROOT / "config"

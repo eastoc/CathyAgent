@@ -16,6 +16,11 @@ from cathy.llm import (  # noqa: E402
     supports_configurable_temperature,
     uses_max_completion_tokens,
 )
+from cathy.llm_errors import LLMCallError  # noqa: E402
+
+
+class _RetryableServerError(Exception):
+    status_code = 500
 
 
 class LLMClientTest(unittest.TestCase):
@@ -67,6 +72,7 @@ class LLMClientTest(unittest.TestCase):
 
         client.chat([{"role": "user", "content": "hi"}])
 
+        self.assertEqual(openai_cls.call_args.kwargs["max_retries"], 0)
         kwargs = completions.create.call_args.kwargs
         self.assertEqual(kwargs["model"], "gpt-5.5")
         self.assertEqual(kwargs["max_completion_tokens"], 4096)
@@ -92,6 +98,51 @@ class LLMClientTest(unittest.TestCase):
         self.assertEqual(kwargs["max_tokens"], 2048)
         self.assertEqual(kwargs["temperature"], 0.7)
         self.assertNotIn("max_completion_tokens", kwargs)
+
+    @patch("cathy.llm.OpenAI")
+    def test_chat_retries_retryable_failures(self, openai_cls: MagicMock) -> None:
+        client = LLMClient(
+            api_key="test-key",
+            base_url="https://api.openai.com/v1",
+            model="gpt-4o-mini",
+            max_retries=2,
+            retry_backoff_initial_sec=0,
+        )
+        completions = openai_cls.return_value.chat.completions
+        expected = MagicMock()
+        completions.create.side_effect = [
+            _RetryableServerError("temporary server failure"),
+            expected,
+        ]
+
+        actual = client.chat([{"role": "user", "content": "hi"}], stage="unit_test")
+
+        self.assertIs(actual, expected)
+        self.assertEqual(completions.create.call_count, 2)
+
+    @patch("cathy.llm.OpenAI")
+    def test_chat_raises_structured_failure_after_non_retryable_error(
+        self,
+        openai_cls: MagicMock,
+    ) -> None:
+        client = LLMClient(
+            api_key="test-key",
+            base_url="https://api.openai.com/v1",
+            model="gpt-4o-mini",
+            max_retries=2,
+            retry_backoff_initial_sec=0,
+        )
+        completions = openai_cls.return_value.chat.completions
+        completions.create.side_effect = ValueError("bad local input")
+
+        with self.assertRaises(LLMCallError) as context:
+            client.chat([{"role": "user", "content": "hi"}], stage="unit_test")
+
+        failure = context.exception.failure
+        self.assertEqual(failure.stage, "unit_test")
+        self.assertEqual(failure.reason, "unknown")
+        self.assertFalse(failure.retryable)
+        self.assertEqual(failure.attempts, 1)
 
 
 if __name__ == "__main__":

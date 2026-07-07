@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
 
+from cathy.llm_errors import AgentFailure
 from robot_sdk.types import KinematicModel, LengthUnit, RobotRequirement, SerializableMixin
 
 
@@ -131,6 +132,8 @@ class KinematicsAgentResult(SerializableMixin):
     assumptions: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     trace: list[dict[str, Any]] = field(default_factory=list)
+    status: Literal["ok", "failed", "degraded", "incomplete"] = "ok"
+    failure: AgentFailure | None = None
 
 
 class KinematicsAgentState(TypedDict, total=False):
@@ -149,6 +152,8 @@ class KinematicsAgentState(TypedDict, total=False):
     assumptions: list[str]
     warnings: list[str]
     trace: list[dict[str, Any]]
+    status: str
+    failure: AgentFailure | None
     final_answer: str
     finished: bool
 

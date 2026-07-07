@@ -21,6 +21,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from cathy.llm_errors import AgentFailure, LLMCallError
 from cathy.subagent import Subagent, SubagentResult
 from robot_sdk.assembly.constraint_graph import (
     build_constraint_graph_report,
@@ -109,6 +110,8 @@ class _LayoutBuildResult:
     trace: list[dict[str, Any]]
     decision: dict[str, Any] | None = None
     structure_plan: RobotStructurePlan | None = None
+    status: str = "ok"
+    failure: AgentFailure | None = None
 
 
 @dataclass(frozen=True)
@@ -295,6 +298,10 @@ class RobotDesignAgent(Subagent):
                     "source_summary": kinematics_result.source_summary,
                     "profile_name": kinematics_result.profile_name,
                     "scale_factor": kinematics_result.scale_factor,
+                    "kinematics_status": getattr(kinematics_result, "status", "ok"),
+                    "kinematics_failure": kinematics_result.failure.to_dict()
+                    if getattr(kinematics_result, "failure", None) is not None
+                    else None,
                     "kinematics_trace": kinematics_result.trace,
                 }
             )
@@ -317,6 +324,10 @@ class RobotDesignAgent(Subagent):
                     else None,
                     "layout_template": layout.metadata.get("layout_template"),
                     "structure_plan_name": layout.metadata.get("structure_plan_name"),
+                    "layout_status": layout_result.status,
+                    "layout_failure": layout_result.failure.to_dict()
+                    if layout_result.failure is not None
+                    else None,
                     "layout_agent_trace": layout_result.trace,
                     "link_morphology": {
                         link.id: link.metadata.get("morphology")
@@ -595,6 +606,17 @@ class RobotDesignAgent(Subagent):
                 }
             )
 
+            subagent_failure = (
+                getattr(kinematics_result, "failure", None) or layout_result.failure
+            )
+            subagent_status = _combine_subagent_status(
+                report_ok=report.ok,
+                statuses=[
+                    str(getattr(kinematics_result, "status", "ok")),
+                    layout_result.status,
+                ],
+                failure=subagent_failure,
+            )
             return SubagentResult(
                 final_answer=_format_final_answer(
                     requirement=requirement,
@@ -612,19 +634,25 @@ class RobotDesignAgent(Subagent):
                     assumptions=combined_assumptions,
                 ),
                 finished=report.ok,
+                status=subagent_status,
+                failure=subagent_failure,
                 trace=trace,
             )
         except Exception as exc:
+            failure = _subagent_failure(exc, stage="robot_design_agent")
             trace.append(
                 {
                     "type": "error",
                     "error_type": type(exc).__name__,
                     "error": str(exc),
+                    "failure": failure.to_dict(),
                 }
             )
             return SubagentResult(
                 final_answer=f"[robot_design_agent] 执行失败: {type(exc).__name__}: {exc}",
                 finished=False,
+                status="failed",
+                failure=failure,
                 trace=trace,
             )
 
@@ -708,8 +736,11 @@ class RobotDesignAgent(Subagent):
                         if hasattr(decision, "to_dict")
                         else None,
                         structure_plan=structure_plan,
+                        status=str(getattr(layout_agent_result, "status", "ok")),
+                        failure=getattr(layout_agent_result, "failure", None),
                     )
                 except Exception as exc:
+                    failure = _subagent_failure(exc, stage="layout_agent")
                     layout = build_tabletop_serial_mechanical_layout_from_agent_model(
                         kinematic_model
                     )
@@ -725,6 +756,7 @@ class RobotDesignAgent(Subagent):
                                 "layout_source": "rule_fallback",
                                 "robot_family": "unknown",
                                 "layout_agent_error": f"{type(exc).__name__}: {exc}",
+                                "layout_agent_failure": failure.to_dict(),
                             },
                         ),
                         trace=[
@@ -732,8 +764,11 @@ class RobotDesignAgent(Subagent):
                                 "type": "layout_agent_error",
                                 "error_type": type(exc).__name__,
                                 "error": str(exc),
+                                "failure": failure.to_dict(),
                             }
                         ],
+                        status="degraded",
+                        failure=failure,
                     )
 
         layout = build_tabletop_serial_mechanical_layout_from_agent_model(kinematic_model)
@@ -747,6 +782,7 @@ class RobotDesignAgent(Subagent):
                 },
             ),
             trace=[{"type": "layout_agent_skipped"}],
+            status="degraded",
         )
 
 
@@ -1913,6 +1949,33 @@ def _metadata_from_kinematics_result(
         scale_factor=result.scale_factor,
         assumptions=list(result.assumptions),
         warnings=list(result.warnings),
+    )
+
+
+def _combine_subagent_status(
+    *,
+    report_ok: bool,
+    statuses: list[str],
+    failure: AgentFailure | None,
+) -> str:
+    if not report_ok:
+        return "failed"
+    if any(status == "failed" for status in statuses):
+        return "failed"
+    if failure is not None or any(status in {"degraded", "incomplete"} for status in statuses):
+        return "degraded"
+    return "ok"
+
+
+def _subagent_failure(exc: Exception, *, stage: str) -> AgentFailure:
+    if isinstance(exc, LLMCallError):
+        return exc.failure
+    return AgentFailure(
+        stage=stage,
+        error_type=type(exc).__name__,
+        reason="unknown",
+        retryable=False,
+        message=str(exc),
     )
 
 

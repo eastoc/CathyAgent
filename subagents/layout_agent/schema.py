@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, TypedDict, get_args
+from typing import Any, Literal, TypedDict, get_args
 
+from cathy.llm_errors import AgentFailure
 from robot_sdk.structure import RobotStructurePlan
 from robot_sdk.types import (
     InterfaceMorphologyType,
@@ -493,6 +494,8 @@ class LayoutAgentResult(SerializableMixin):
     decision: LayoutDecision
     structure_plan: RobotStructurePlan | None = None
     trace: list[dict[str, Any]] = field(default_factory=list)
+    status: Literal["ok", "failed", "degraded", "incomplete"] = "ok"
+    failure: AgentFailure | None = None
 
 
 class LayoutAgentState(TypedDict, total=False):
@@ -509,6 +512,8 @@ class LayoutAgentState(TypedDict, total=False):
     trace: list[dict[str, Any]]
     raw_decision: str | None
     decision_error: str | None
+    status: str
+    failure: AgentFailure | None
 
 
 def _require_text(value: str, field_name: str) -> None:

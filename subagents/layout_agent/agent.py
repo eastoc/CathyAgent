@@ -9,6 +9,7 @@ from typing import Any
 
 from langgraph.graph import END, StateGraph
 
+from cathy.llm_errors import AgentFailure, LLMCallError
 from cathy.subagent import Subagent, SubagentResult
 from robot_sdk.kinematics.dh import estimate_reach
 from robot_sdk.layout.debug import build_layout_debug_report
@@ -78,9 +79,12 @@ class LayoutAgent(Subagent):
         try:
             result = self.build_result(params)
         except Exception as exc:
+            failure = _subagent_failure(exc, stage="layout_agent")
             return SubagentResult(
                 final_answer=f"[layout_agent] 执行失败: {type(exc).__name__}: {exc}",
                 finished=False,
+                status="failed",
+                failure=failure,
                 trace=[
                     {
                         "type": "error",
@@ -92,6 +96,8 @@ class LayoutAgent(Subagent):
         return SubagentResult(
             final_answer=_format_final_answer(result),
             finished=True,
+            status=result.status,
+            failure=result.failure,
             trace=result.trace,
         )
 
@@ -167,6 +173,7 @@ class LayoutAgent(Subagent):
         decision = fallback
         structure_plan = fallback_structure_plan
         decision_error: str | None = None
+        failure: AgentFailure | None = None
 
         if self._llm is not None:
             try:
@@ -188,6 +195,7 @@ class LayoutAgent(Subagent):
                 structure_plan = parsed_structure_plan or fallback_structure_plan
             except Exception as exc:  # LLM decision is advisory; SDK fallback keeps flow alive.
                 decision_error = f"{type(exc).__name__}: {exc}"
+                failure = _subagent_failure(exc, stage="layout_decision")
                 decision = replace(
                     fallback,
                     warnings=[
@@ -236,6 +244,8 @@ class LayoutAgent(Subagent):
             "structure_plan": structure_plan,
             "raw_decision": raw,
             "decision_error": decision_error,
+            "status": "degraded" if decision_error else "ok",
+            "failure": failure,
             "trace": trace,
         }
 
@@ -244,6 +254,8 @@ class LayoutAgent(Subagent):
             decision=state["decision"],
             structure_plan=state.get("structure_plan"),
             trace=[*list(state.get("trace") or []), {"type": "finalize"}],
+            status=str(state.get("status") or "ok"),
+            failure=state.get("failure"),
         )
         return {**state, "result": result, "trace": result.trace}
 
@@ -798,6 +810,18 @@ def _format_final_answer(result: LayoutAgentResult) -> str:
         f"{link_lines}\n\n"
         "## 警告\n"
         f"{warnings}"
+    )
+
+
+def _subagent_failure(exc: Exception, *, stage: str) -> AgentFailure:
+    if isinstance(exc, LLMCallError):
+        return exc.failure
+    return AgentFailure(
+        stage=stage,
+        error_type=type(exc).__name__,
+        reason="unknown",
+        retryable=False,
+        message=str(exc),
     )
 
 

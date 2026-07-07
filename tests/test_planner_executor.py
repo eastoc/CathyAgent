@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -272,7 +273,11 @@ class PlannerExecutorAsToolTest(unittest.TestCase):
         self.assertTrue(bad.startswith("[ToolError:planner_executor]"))
 
         good = registry.call("planner_executor", {"goal": "test"})
-        self.assertEqual(good, "ok")
+        payload = json.loads(good)
+        self.assertEqual(payload["subagent"], "planner_executor")
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["finished"])
+        self.assertEqual(payload["final_answer"], "ok")
 
 
 if __name__ == "__main__":
