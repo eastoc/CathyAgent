@@ -30,6 +30,7 @@ from .hooks import (
     USER_PROMPT_SUBMIT,
 )
 from .llm import LLMClient
+from .llm_errors import LLMCallError
 from .plugins import PluginRegistry
 from .session.models import Message, Session
 from .session.store import SessionStore
@@ -138,7 +139,21 @@ class Agent:
         schemas = self.tools.openai_schemas() or None
 
         for step in range(self.config.max_steps):
-            response = self.llm.chat(messages, tools=schemas)
+            try:
+                response = _chat_with_optional_stage(
+                    self.llm,
+                    messages,
+                    tools=schemas,
+                    stage="main_react",
+                )
+            except LLMCallError as exc:
+                content = _llm_error_message(exc)
+                assistant_msg = Message(role="assistant", content=content)
+                self.store.append_message(session.id, assistant_msg)
+                session.append(assistant_msg)
+                trace.add("llm_error", {"step": step, "failure": exc.failure.to_dict()})
+                self._on_event("llm_error", {"failure": exc.failure.to_dict()})
+                return content, trace
             msg = response.choices[0].message
 
             # ---- 终止分支：无 tool_calls，准备返回 ----
@@ -260,7 +275,10 @@ class Agent:
                 trace.add("tool_call", {"step": step, "name": name, "args": args})
 
                 started_ms = int(time.time() * 1000)
-                result = self.tools.call(name, args)
+                try:
+                    result = self.tools.call(name, args)
+                except Exception as exc:
+                    result = _tool_error_payload(name, exc)
                 latency_ms = int(time.time() * 1000) - started_ms
 
                 # === Hook 3/4: PostToolUse ===
@@ -289,3 +307,40 @@ class Agent:
         msg_text = f"[已达到最大步数 {self.config.max_steps}，提前结束]"
         trace.add("max_steps", {"content": msg_text})
         return msg_text, trace
+
+
+def _llm_error_message(exc: LLMCallError) -> str:
+    failure = exc.failure
+    retry_text = "可重试错误已耗尽重试次数" if failure.retryable else "不可重试错误"
+    return (
+        f"[LLMError:{failure.reason}] {retry_text}: "
+        f"{failure.error_type}: {failure.message}"
+    )
+
+
+def _tool_error_payload(tool_name: str, exc: Exception) -> str:
+    return json.dumps(
+        {
+            "type": "tool_error",
+            "tool": tool_name,
+            "error_type": type(exc).__name__,
+            "message": str(exc),
+            "retryable": False,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _chat_with_optional_stage(
+    llm: Any,
+    messages: list[dict[str, Any]],
+    *,
+    tools: list[dict] | None,
+    stage: str,
+) -> Any:
+    try:
+        return llm.chat(messages, tools=tools, stage=stage)
+    except TypeError as exc:
+        if "stage" not in str(exc):
+            raise
+        return llm.chat(messages, tools=tools)

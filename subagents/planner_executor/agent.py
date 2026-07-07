@@ -25,6 +25,7 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
 
+from cathy.llm_errors import AgentFailure, LLMCallError
 from cathy.subagent import Subagent, SubagentResult
 from cathy.subagent.runner import SubagentRunner
 
@@ -368,9 +369,12 @@ class PlannerExecutorSubagent(Subagent):
         try:
             final_state = self._graph.invoke(initial, config=config)
         except Exception as exc:
+            failure = _subagent_failure(exc, stage="planner_executor")
             return SubagentResult(
                 final_answer=f"[planner_executor] 图执行失败: {type(exc).__name__}: {exc}",
                 finished=False,
+                status="failed",
+                failure=failure,
             )
 
         result = SubagentResult(
@@ -380,3 +384,15 @@ class PlannerExecutorSubagent(Subagent):
             trace=list(final_state.get("trace") or []),
         )
         return result
+
+
+def _subagent_failure(exc: Exception, *, stage: str) -> AgentFailure:
+    if isinstance(exc, LLMCallError):
+        return exc.failure
+    return AgentFailure(
+        stage=stage,
+        error_type=type(exc).__name__,
+        reason="unknown",
+        retryable=False,
+        message=str(exc),
+    )

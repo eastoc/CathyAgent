@@ -16,6 +16,11 @@ from cathy.llm import (  # noqa: E402
     supports_configurable_temperature,
     uses_max_completion_tokens,
 )
+from cathy.llm_errors import LLMCallError  # noqa: E402
+
+
+class _RetryableServerError(Exception):
+    status_code = 500
 
 
 class LLMClientTest(unittest.TestCase):
@@ -92,6 +97,44 @@ class LLMClientTest(unittest.TestCase):
         self.assertEqual(kwargs["max_tokens"], 2048)
         self.assertEqual(kwargs["temperature"], 0.7)
         self.assertNotIn("max_completion_tokens", kwargs)
+
+    @patch("cathy.llm.OpenAI")
+    def test_chat_retries_retryable_errors(self, openai_cls: MagicMock) -> None:
+        client = LLMClient(
+            api_key="test-key",
+            base_url="https://api.openai.com/v1",
+            model="gpt-4o-mini",
+            max_retries=1,
+            retry_backoff_initial_sec=0,
+        )
+        completions = openai_cls.return_value.chat.completions
+        expected = MagicMock()
+        completions.create.side_effect = [_RetryableServerError("temporary"), expected]
+
+        actual = client.chat([{"role": "user", "content": "hi"}], stage="test")
+
+        self.assertIs(actual, expected)
+        self.assertEqual(completions.create.call_count, 2)
+
+    @patch("cathy.llm.OpenAI")
+    def test_chat_raises_structured_failure_after_retries(self, openai_cls: MagicMock) -> None:
+        client = LLMClient(
+            api_key="test-key",
+            base_url="https://api.openai.com/v1",
+            model="gpt-4o-mini",
+            max_retries=1,
+            retry_backoff_initial_sec=0,
+        )
+        completions = openai_cls.return_value.chat.completions
+        completions.create.side_effect = _RetryableServerError("temporary")
+
+        with self.assertRaises(LLMCallError) as ctx:
+            client.chat([{"role": "user", "content": "hi"}], stage="test_stage")
+
+        self.assertEqual(ctx.exception.failure.reason, "server_error")
+        self.assertTrue(ctx.exception.failure.retryable)
+        self.assertEqual(ctx.exception.failure.stage, "test_stage")
+        self.assertEqual(ctx.exception.failure.attempts, 2)
 
 
 if __name__ == "__main__":

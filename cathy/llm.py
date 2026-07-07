@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from openai import OpenAI
+
+from .llm_errors import LLMCallError, classify_llm_exception
 
 
 def _normalize_model(model: str) -> str:
@@ -58,6 +61,9 @@ class LLMClient:
         temperature: float = 0.7,
         max_tokens: int | None = 4096,
         timeout: float = 60.0,
+        max_retries: int = 2,
+        retry_backoff_initial_sec: float = 1.0,
+        retry_backoff_max_sec: float = 20.0,
     ) -> None:
         if not api_key:
             raise ValueError("LLM api_key 未配置")
@@ -65,6 +71,10 @@ class LLMClient:
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.timeout = float(timeout)
+        self.max_retries = max(0, int(max_retries))
+        self.retry_backoff_initial_sec = max(0.0, float(retry_backoff_initial_sec))
+        self.retry_backoff_max_sec = max(0.0, float(retry_backoff_max_sec))
 
     def chat(
         self,
@@ -72,6 +82,7 @@ class LLMClient:
         *,
         tools: list[dict] | None = None,
         tool_choice: str | None = "auto",
+        stage: str = "llm.chat",
     ) -> Any:
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -82,4 +93,26 @@ class LLMClient:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice or "auto"
-        return self._client.chat.completions.create(**kwargs)
+        return self._create_with_retry(kwargs, stage=stage)
+
+    def _create_with_retry(self, kwargs: dict[str, Any], *, stage: str) -> Any:
+        attempts_allowed = self.max_retries + 1
+        last_failure = None
+        for attempt in range(1, attempts_allowed + 1):
+            try:
+                return self._client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                failure = classify_llm_exception(exc, stage=stage, attempts=attempt)
+                last_failure = failure
+                if not failure.retryable or attempt >= attempts_allowed:
+                    raise LLMCallError(failure) from exc
+                self._sleep_before_retry(attempt)
+        if last_failure is not None:
+            raise LLMCallError(last_failure)
+        raise RuntimeError("LLM call retry loop ended unexpectedly")
+
+    def _sleep_before_retry(self, attempt: int) -> None:
+        delay = self.retry_backoff_initial_sec * (2 ** max(0, attempt - 1))
+        delay = min(delay, self.retry_backoff_max_sec)
+        if delay > 0:
+            time.sleep(delay)

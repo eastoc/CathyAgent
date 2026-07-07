@@ -5,13 +5,14 @@ Phase 3.5 起：execute() 返回前会触发 SubagentStop hook，可改写 final
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 from ..hooks import HookEvent, HookManager, SUBAGENT_STOP
 from ..plugins.base import PluginError, ToolPlugin
 from ..plugins.manifest import Execution, PluginManifest, ToolSpec
-from .base import Subagent
+from .base import Subagent, SubagentResult
 
 
 def build_subagent_tool_manifest(subagent: Subagent) -> PluginManifest:
@@ -80,7 +81,15 @@ class SubagentToolPlugin(ToolPlugin):
             if decision.inject_context:
                 final = f"{final}\n\n[hook:SubagentStop] {decision.inject_context}"
 
-        return final
+        if final != result.final_answer:
+            result = SubagentResult(
+                final_answer=final,
+                finished=result.finished,
+                status=result.status,
+                failure=result.failure,
+                trace=result.trace,
+            )
+        return json.dumps(result.to_dict(subagent=self._subagent.name), ensure_ascii=False)
 
     @property
     def subagent(self) -> Subagent:

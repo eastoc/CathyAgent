@@ -9,6 +9,7 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
 
+from cathy.llm_errors import AgentFailure, LLMCallError
 from cathy.subagent import Subagent, SubagentResult
 
 
@@ -164,9 +165,12 @@ class SearchAgent(Subagent):
                 }
             )
         except Exception as exc:
+            failure = _subagent_failure(exc, stage="search_agent")
             return SubagentResult(
                 final_answer=f"[search_agent] 图执行失败: {type(exc).__name__}: {exc}",
                 finished=False,
+                status="failed",
+                failure=failure,
             )
 
         return SubagentResult(
@@ -333,3 +337,15 @@ class SearchAgent(Subagent):
                 f"   摘要: {item['summary']}"
             )
         return "\n".join(lines)
+
+
+def _subagent_failure(exc: Exception, *, stage: str) -> AgentFailure:
+    if isinstance(exc, LLMCallError):
+        return exc.failure
+    return AgentFailure(
+        stage=stage,
+        error_type=type(exc).__name__,
+        reason="unknown",
+        retryable=False,
+        message=str(exc),
+    )
