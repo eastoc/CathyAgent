@@ -15,6 +15,17 @@ from .ids import (
     kinematic_frame_id,
     mount_frame_id,
 )
+from .robot_structure_plan import (
+    DatumPlan,
+    JointAxisPlan,
+    LinkRoutePlan,
+    RobotStructurePlan,
+    StructureStation,
+    StructureSubassemblyPlan,
+    axes_are_parallel,
+    build_generic_6axis_cobot_structure_plan,
+    normalized_axis,
+)
 
 __all__ = [
     "SerialChainIds",
@@ -30,4 +41,13 @@ __all__ = [
     "joint_axis_frame_id",
     "kinematic_frame_id",
     "mount_frame_id",
+    "DatumPlan",
+    "JointAxisPlan",
+    "LinkRoutePlan",
+    "RobotStructurePlan",
+    "StructureStation",
+    "StructureSubassemblyPlan",
+    "axes_are_parallel",
+    "build_generic_6axis_cobot_structure_plan",
+    "normalized_axis",
 ]

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+from robot_sdk.cad.bbox import CadBoundingBox, bounding_box_from_cad_object
 from robot_sdk.cad.cq_assembly import CadQueryAssemblyResult
 
 
@@ -17,6 +18,7 @@ class CadQueryExportResult:
     export_type: str
     exists: bool
     size_bytes: int | None = None
+    bbox: CadBoundingBox | None = None
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,8 @@ class CadQuerySubassemblyExportSpec:
     name: str
     part_ids: list[str]
     part_export_names: dict[str, str] | None = None
+    source_local_subassembly_name: str | None = None
+    local_solve_usage: str = "not_applicable"
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,9 @@ class CadQuerySubassemblyExportResult:
     part_export_names: dict[str, str]
     part_exports: list[CadQueryExportResult]
     assembly_export: CadQueryExportResult
+    assembly_source: str = "fixed_layout_pose"
+    source_local_subassembly_name: str | None = None
+    local_solve_usage: str = "not_applicable"
 
 
 @dataclass(frozen=True)
@@ -47,6 +54,7 @@ class CadQueryStepPackageExportResult:
     root_dir: Path
     whole_machine_export: CadQueryExportResult
     subassemblies: list[CadQuerySubassemblyExportResult]
+    whole_machine_assembly_source: str = "fixed_layout_pose"
 
     @property
     def all_exports(self) -> list[CadQueryExportResult]:
@@ -152,6 +160,7 @@ def export_cadquery_object(
         export_type=export_type,
         exists=exists,
         size_bytes=size_bytes,
+        bbox=bounding_box_from_cad_object(cad_object),
     )
 
 
@@ -173,22 +182,38 @@ def export_robot_step_package(
     whole_name = _step_filename(whole_machine_filename)
 
     specs = list(subassemblies) if subassemblies is not None else _default_subassembly_specs(cad_result)
+    local_result_by_name = {
+        str(result.name): result
+        for result in cad_result.local_subassembly_results
+        if bool(getattr(result, "solved", False))
+    }
     exported_subassemblies: list[CadQuerySubassemblyExportResult] = []
     for spec in specs:
         subassembly_name = _safe_path_stem(spec.name)
         subassembly_dir = root / subassembly_name
         subassembly_dir.mkdir(parents=True, exist_ok=True)
         part_export_names = dict(spec.part_export_names or {})
+        source_local_name = spec.source_local_subassembly_name
+        source_local_result = (
+            local_result_by_name.get(source_local_name)
+            if source_local_name
+            else None
+        )
 
         part_exports: list[CadQueryExportResult] = []
-        subassembly = _new_subassembly_like(cad_result.assembly)
+        subassembly = (
+            source_local_result.assembly
+            if source_local_result is not None
+            else _new_subassembly_like(cad_result.assembly)
+        )
         for part_id in spec.part_ids:
             part = cad_result.part_catalog.require(part_id)
-            subassembly.add(
-                part.solid,
-                name=part_id,
-                loc=cad_result.part_locations.get(part_id),
-            )
+            if source_local_result is None:
+                subassembly.add(
+                    part.solid,
+                    name=part_id,
+                    loc=cad_result.part_locations.get(part_id),
+                )
             part_exports.append(
                 export_step(
                     part.solid,
@@ -216,6 +241,22 @@ def export_robot_step_package(
                 part_export_names=part_export_names,
                 part_exports=part_exports,
                 assembly_export=assembly_export,
+                assembly_source=(
+                    "local_constraint_solve"
+                    if source_local_result is not None
+                    else "fixed_layout_pose"
+                ),
+                source_local_subassembly_name=source_local_name
+                if source_local_result is not None
+                else None,
+                local_solve_usage=(
+                    spec.local_solve_usage
+                    if source_local_result is not None
+                    and spec.local_solve_usage != "not_applicable"
+                    else "experimental_local_solve"
+                    if source_local_result is not None
+                    else "not_applicable"
+                ),
             )
         )
 
@@ -232,6 +273,9 @@ def export_robot_step_package(
         root_dir=root,
         whole_machine_export=whole_machine_export,
         subassemblies=exported_subassemblies,
+        whole_machine_assembly_source=str(
+            cad_result.metadata.get("production_assembly_source") or "fixed_layout_pose"
+        ),
     )
 
 

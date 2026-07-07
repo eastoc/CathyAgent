@@ -7,9 +7,16 @@ version: "0.1.0"
 
 加载本 skill 后，处理机器人 CAD / 机械臂设计 / DH 到 CAD 建模相关任务时必须遵守以下边界。
 
+## SDK 文档必读
+
+如果任务涉及修改或调用 `robot_sdk`、`subagents/robot_design_agent`、`subagents/kinematics_agent`、`subagents/layout_agent`、CAD 导出、装配约束或 STEP package，必须先阅读 `docs/robot_sdk.md`。
+
+`docs/robot_sdk.md` 是 agent 读入边界文档，记录 SDK 层级、当前主流程、禁忌、当前装配限制和下一阶段扩展点。不要仅凭本 skill 的摘要改 SDK 代码。
+
 ## 结论先行
 
 - 如果用户要“生成 CAD / 导出 STEP / 跑 MVP 建模”，主 agent 应调用 `robot_design_agent`。
+- 如果用户说“机器人建模 / 机械臂建模”，且没有明确限定“只要 DH/运动学”，也应调用 `robot_design_agent`，不要只调用 `kinematics_agent`。
 - 如果用户只是问设计流程、审查方法或概念解释，主 agent 可直接按本 skill 回答。
 - Skill 只放方法论、模板和检查清单；Subagent 才执行 SDK、生成 CAD、导出文件。
 - 不要把 DH transform 当成 CAD 实体装配 transform。
@@ -32,7 +39,8 @@ version: "0.1.0"
 4. CAD 与装配
    - CAD 只消费 `MechanicalLayout`，不直接消费 DH 表。
    - 零件应有可追踪的 `PartFeature`，例如 mount face、joint axis、flange face、link end。
-   - 装配关系应表达为 `AssemblyConstraint`，再由 CadQuery adapter / deterministic placement 执行。
+   - 装配关系应表达为 `AssemblyConstraint`，再由 CadQuery adapter 执行 `constraint_solve`。
+   - 当前生产整机 STEP 仍是 `constraint_solve_fixed_layout_pose`：solver 使用固定布局姿态约束。语义装配约束已可进入 local subassembly solve 和 experimental full-assembly fixture，但尚未作为生产整机 STEP 的主约束。回答和文档中必须如实说明。
    - STEP package 的目录和文件命名由 `robot_design_agent` 的 CAD naming rule 决定，不应硬编码在 `robot_sdk`。
    - 命名应采用 CAD 语义名，例如 `base`、`joint1`、`link1`、`left_frontleg`；零件文件名应避免和同目录总成 STEP 冲突，例如 `joint1/joint1_housing.step` 与 `joint1/joint1.step`。
 

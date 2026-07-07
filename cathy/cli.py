@@ -40,6 +40,8 @@ from .skills import (  # noqa: E402
 )
 from .subagent import SubagentToolPlugin, build_subagent_tool_manifest  # noqa: E402
 from subagents.planner_executor import PlannerExecutorSubagent  # noqa: E402
+from subagents.kinematics_agent import KinematicsAgent  # noqa: E402
+from subagents.layout_agent import LayoutAgent  # noqa: E402
 from subagents.robot_design_agent import RobotDesignAgent  # noqa: E402
 from subagents.search_agent import SearchAgent  # noqa: E402
 
@@ -258,8 +260,24 @@ def build_runtime(cfg: dict | None = None) -> tuple[Agent, SessionStore, HookMan
         blocked={"planner_executor", "robot_design_agent", "web_search"},
     )
 
-    # ---- Subagent：robot_design_agent（固定 Robot CAD MVP 流程） ----
-    robot_design_agent = RobotDesignAgent(workspace_root=_resolve_workspace_root(cfg))
+    # ---- Subagent：kinematics_agent（LangGraph 运动学来源决策 + SDK 编排） ----
+    kinematics_agent = KinematicsAgent(llm=llm, tools=subagent_tool_view)
+    registry.register_internal_plugin(
+        build_subagent_tool_manifest(kinematics_agent),
+        SubagentToolPlugin(kinematics_agent, hooks=hooks),
+    )
+    logger.info("[subagents] exposed: kinematics_agent")
+
+    # ---- Subagent：layout_agent（Robot CAD 内部布局形态决策） ----
+    layout_agent = LayoutAgent(llm=llm)
+    logger.info("[subagents] internal: layout_agent")
+
+    # ---- Subagent：robot_design_agent（Robot CAD MVP 流程，消费 kinematics/layout） ----
+    robot_design_agent = RobotDesignAgent(
+        workspace_root=_resolve_workspace_root(cfg),
+        kinematics_agent=kinematics_agent,
+        layout_agent=layout_agent,
+    )
     registry.register_internal_plugin(
         build_subagent_tool_manifest(robot_design_agent),
         SubagentToolPlugin(robot_design_agent, hooks=hooks),

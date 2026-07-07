@@ -52,7 +52,7 @@ python -m cathy
 | 会话持久化（SQLite） + `--session` / `--list-sessions` | ✅ |
 | Token 预算硬截断（user 边界对齐） | ✅ |
 | **Skills**（静态模板 + `read_skill` 工具，progressive disclosure） | ✅ |
-| **Subagents**：`search_agent` / `planner_executor` 基于 LangGraph，`robot_design_agent` 跑 Robot CAD MVP | ✅ |
+| **Subagents**：`search_agent` / `planner_executor` / `kinematics_agent` 基于 LangGraph，`robot_design_agent` 跑 Robot CAD MVP | ✅ |
 | **ToolView**（白/黑名单视图，限定子 agent 可用工具集） | ✅ |
 | **统一日志**：`cathy/logger.py`，日志写入项目根 `log/` | ✅ |
 | **Hooks 中间件**：8 类事件 + Python/Command 双后端，兼容 `.claude/settings.json` | ✅ |
@@ -70,7 +70,7 @@ python -m cathy
 | 在哪里 | `skills/<name>/SKILL.md` | `subagents/<name>/agent.py` |
 | 谁用 | 主 agent / 子 agent 都能加载 | 由父 agent 派任务 |
 | 怎么用 | 调 `read_skill(name)` 读取全文，按指示行事 | 直接调对应工具（如 `planner_executor`） |
-| 例子 | `summarize` / `write_blog` / `robot_cad_design` | `search_agent` / `planner_executor` / `robot_design_agent` |
+| 例子 | `summarize` / `write_blog` / `robot_cad_design` | `search_agent` / `planner_executor` / `kinematics_agent` / `robot_design_agent` |
 
 ## 内置插件清单
 
@@ -82,6 +82,7 @@ python -m cathy
 | `skills` | `read_skill` | 按名拉取一份 SKILL.md 全文（progressive disclosure） |
 | `search_agent` | `search_agent` | LangGraph 搜索子 agent：扩写 query、调用 `web_search`、筛选相关网页 |
 | `planner_executor` | `planner_executor` | LangGraph 实现的 plan-execute-replan 子 agent |
+| `kinematics_agent` | `kinematics_agent` | LangGraph 运动学子 agent：LLM decision schema 选择 profile/scaling/template 路径，再调用 `robot_sdk.kinematics` 生成可追溯 `KinematicModel` |
 | `robot_design_agent` | `robot_design_agent` | 机器人 CAD 执行型子 agent：需求解析、运动学模型、MechanicalLayout、CadQuery 粗 CAD、零件/子总成/整机 STEP 导出、验证报告 |
 | `mcp`（运行时注入） | `mcp__<server>__<tool>` | 外部 MCP 生态工具（FastMCP Client 聚合） |
 
@@ -170,6 +171,19 @@ START → planner ──→ executor ──┬─── (plan 仍有步骤) ─�
 
 主 agent 何时该派给 `planner_executor`：任务**复杂、多步、中间产物长**；
 简单单步任务直接 ReAct 完成即可，不要无脑派出。
+
+### `kinematics_agent`
+
+`kinematics_agent` 负责在 CAD/layout 之前生成可追溯 `KinematicModel`。它的 LangGraph 流程是：
+
+```
+START → decision → profile_model/search_model/template_fallback → validate → finalize → END
+```
+
+- **decision**：LLM 只输出结构化 decision schema，选择 `exact_profile` / `scaled_profile` / `profile_like_template` / `search_verified` / `template_fallback`。
+- **profile_model**：调用 `robot_sdk.kinematics.scaling`，生成官方 profile、缩放 profile 或 profile-like template 模型。
+- **search_model**：首版保留搜索接口；DH 搜索解析未实现时会明确 warning 并回退 template。
+- **validate**：做基础 reach/DOF trace，保证需求文档能追溯来源、scale factor 和 warning。
 
 ### `robot_design_agent`
 
@@ -332,6 +346,8 @@ CathyAgent/
       agent.py                # LangGraph query 扩写 + web_search + 结果筛选
     planner_executor/
       agent.py                # LangGraph plan-execute-replan
+    kinematics_agent/
+      agent.py                # LangGraph 运动学来源决策 + SDK 编排
   skills/
     summarize/SKILL.md
     write_blog/SKILL.md

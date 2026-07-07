@@ -38,6 +38,43 @@ EnvelopeShape = Literal[
     "mount_plate",
     "custom",
 ]
+LinkPrimitiveType = Literal[
+    "straight_link",
+    "offset_link",
+    "elbow_link",
+    "wrist_spacer",
+]
+LayoutSource = Literal["layout_agent", "rule_fallback", "manual", "unknown"]
+JointMorphologyType = Literal[
+    "base_yaw_joint",
+    "shoulder_joint",
+    "elbow_joint",
+    "wrist_pitch_joint",
+    "wrist_roll_joint",
+    "tool_flange_joint",
+    "generic_revolute_joint",
+]
+LinkMorphologyType = Literal[
+    "base_column",
+    "upper_arm_link",
+    "forearm_link",
+    "wrist1_offset_housing",
+    "wrist2_elbow_cylinder",
+    "wrist3_tool_flange",
+    "terminal_tool_spacer",
+    "generic_straight_link",
+    "generic_offset_link",
+    "generic_elbow_link",
+    "generic_wrist_spacer",
+]
+InterfaceMorphologyType = Literal[
+    "base_mount_face",
+    "actuator_flange",
+    "arm_flange",
+    "wrist_cross_axis_interface",
+    "tool_mount_flange",
+    "generic_flange",
+]
 PartFeatureType = Literal["plane", "axis", "point", "edge", "face"]
 PartFeatureSemantic = Literal[
     "mount_face",
@@ -47,7 +84,19 @@ PartFeatureSemantic = Literal[
     "tool_mount",
     "custom",
 ]
-AssemblyConstraintKind = Literal["Fixed", "Plane", "Axis", "Point"]
+AssemblyConstraintKind = Literal[
+    "Fixed",
+    "Plane",
+    "Axis",
+    "Point",
+    "MatePlane",
+    "MateAxis",
+    "MateFrame",
+    "Coaxial",
+    "Flush",
+    "Offset",
+    "FixedSeed",
+]
 
 
 @dataclass
@@ -290,6 +339,7 @@ class JointLayout(SerializableMixin):
     child_link: str
     range: tuple[float, float] | None = None
     actuator_envelope: EnvelopeSpec | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -311,6 +361,7 @@ class LinkLayout(SerializableMixin):
     from_interface: str | None
     to_interface: str | None
     envelope: EnvelopeSpec
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -390,6 +441,7 @@ class MechanicalLayout(SerializableMixin):
     envelopes: list[EnvelopeSpec] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.base_frame.semantic not in {"mount", "kinematic"}:
