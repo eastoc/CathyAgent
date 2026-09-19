@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib
 import json
 import subprocess
+import sys
 import time
 import traceback
 from dataclasses import dataclass
@@ -64,7 +65,7 @@ class PythonRunner:
         if ":" not in target:
             raise ValueError(f"python hook target 必须为 'module:func'，得到 {target!r}")
         module_path, func_name = target.split(":", 1)
-        module = importlib.import_module(module_path)
+        module = _resolve_module(module_path)
         fn = getattr(module, func_name, None)
         if fn is None or not callable(fn):
             raise ValueError(f"在 {module_path} 中找不到可调用对象 {func_name!r}")
@@ -165,6 +166,22 @@ def build_runner(spec: HookSpec) -> PythonRunner | CommandRunner:
     if spec.runner_type == "command":
         return CommandRunner(spec)
     raise ValueError(f"不支持的 hook runner_type: {spec.runner_type!r}")
+
+
+def _resolve_module(module_path: str) -> Any:
+    """Resolve hook modules without importing duplicate unittest modules.
+
+    `python -m unittest discover tests` may load `tests/foo.py` as `foo`, while
+    hook configs often reference `tests.foo:hook`. Prefer the already-loaded
+    short module in that case so module-level state remains shared.
+    """
+
+    if module_path in sys.modules:
+        return sys.modules[module_path]
+    short_name = module_path.rsplit(".", 1)[-1]
+    if module_path.startswith("tests.") and short_name in sys.modules:
+        return sys.modules[short_name]
+    return importlib.import_module(module_path)
 
 
 @dataclass

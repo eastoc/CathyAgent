@@ -24,6 +24,8 @@ DEFAULT_LINK_LENGTH_MM = 100.0
 DEFAULT_TOOL_FLANGE_RADIUS_MM = 20.0
 DEFAULT_TOOL_FLANGE_THICKNESS_MM = 12.0
 MIN_ROUTE_SEGMENT_MM = 1.0
+DEFAULT_ROUTE_ENDPOINT_CLEARANCE_MM = 24.0
+MAX_ENDPOINT_TRIM_FRACTION = 0.28
 
 
 @dataclass(frozen=True)
@@ -133,6 +135,11 @@ def build_source_structure_joint_part(
     b = _import_build123d()
     axis_direction = _axis_direction_for_role(axis_role)
     primitive_family = _joint_primitive_family(axis_role, morphology)
+    radius, length = _joint_dimensions_for_family(
+        primitive_family,
+        radius=radius,
+        length=length,
+    )
     visual_features = _joint_visual_features(primitive_family)
     part = label_shape(
         _structure_joint_shape(
@@ -201,6 +208,7 @@ def build_source_routed_link_part(
     morphology: str | None = None,
     width: float = DEFAULT_LINK_WIDTH_MM,
     height: float = DEFAULT_LINK_HEIGHT_MM,
+    endpoint_clearance: float = DEFAULT_ROUTE_ENDPOINT_CLEARANCE_MM,
 ) -> SourcePart:
     """Build a link whose local output datum follows a structure route.
 
@@ -222,6 +230,7 @@ def build_source_routed_link_part(
             primitive_family=primitive_family,
             width=width,
             height=height,
+            endpoint_clearance=endpoint_clearance,
         ),
         part_id,
     )
@@ -240,6 +249,7 @@ def build_source_routed_link_part(
             "visual_features": visual_features,
             "width": width,
             "height": height,
+            "endpoint_clearance": endpoint_clearance,
             "source_joint_mode": "routed_endpoint",
         },
     )
@@ -498,15 +508,24 @@ def _route_shape(
     primitive_family: str,
     width: float,
     height: float,
+    endpoint_clearance: float,
 ) -> Any:
     children: list[Any] = []
     points = _route_points(vector, route_type)
-    for start, end in zip(points, points[1:]):
+    segment_count = max(0, len(points) - 1)
+    for index, (start, end) in enumerate(zip(points, points[1:])):
+        segment_start, segment_end = _trim_route_segment(
+            start,
+            end,
+            trim_start=index == 0,
+            trim_end=index == segment_count - 1,
+            endpoint_clearance=endpoint_clearance,
+        )
         children.extend(
             _axis_segment_shapes(
                 b,
-                start=start,
-                end=end,
+                start=segment_start,
+                end=segment_end,
                 width=width,
                 height=height,
                 primitive_family=primitive_family,
@@ -517,7 +536,7 @@ def _route_shape(
     children.extend(
         _route_fitting_shapes(
             b,
-            points=points,
+            points=_visual_route_points(points, endpoint_clearance),
             width=width,
             height=height,
             primitive_family=primitive_family,
@@ -529,6 +548,98 @@ def _route_shape(
             * b.Box(max(abs(vector[0]), MIN_ROUTE_SEGMENT_MM), width, height)
         )
     return b.Compound(label=f"{primitive_family}_route", children=children)
+
+
+def _trim_route_segment(
+    start: tuple[float, float, float],
+    end: tuple[float, float, float],
+    *,
+    trim_start: bool,
+    trim_end: bool,
+    endpoint_clearance: float,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    length = _segment_length(start, end)
+    if length <= MIN_ROUTE_SEGMENT_MM:
+        return start, end
+    start_trim = _endpoint_trim(length, endpoint_clearance) if trim_start else 0.0
+    end_trim = _endpoint_trim(length, endpoint_clearance) if trim_end else 0.0
+    if start_trim <= 0.0 and end_trim <= 0.0:
+        return start, end
+    ux = (end[0] - start[0]) / length
+    uy = (end[1] - start[1]) / length
+    uz = (end[2] - start[2]) / length
+    return (
+        (
+            start[0] + ux * start_trim,
+            start[1] + uy * start_trim,
+            start[2] + uz * start_trim,
+        ),
+        (
+            end[0] - ux * end_trim,
+            end[1] - uy * end_trim,
+            end[2] - uz * end_trim,
+        ),
+    )
+
+
+def _visual_route_points(
+    points: list[tuple[float, float, float]],
+    endpoint_clearance: float,
+) -> list[tuple[float, float, float]]:
+    if len(points) < 2:
+        return list(points)
+    result = list(points)
+    result[0] = _point_towards(
+        points[0],
+        points[1],
+        _endpoint_trim(_segment_length(points[0], points[1]), endpoint_clearance),
+    )
+    result[-1] = _point_towards(
+        points[-1],
+        points[-2],
+        _endpoint_trim(_segment_length(points[-1], points[-2]), endpoint_clearance),
+    )
+    return _dedupe_points(result)
+
+
+def _point_towards(
+    start: tuple[float, float, float],
+    target: tuple[float, float, float],
+    distance: float,
+) -> tuple[float, float, float]:
+    length = _segment_length(start, target)
+    if length <= MIN_ROUTE_SEGMENT_MM or distance <= 0.0:
+        return start
+    distance = min(distance, length - MIN_ROUTE_SEGMENT_MM)
+    ux = (target[0] - start[0]) / length
+    uy = (target[1] - start[1]) / length
+    uz = (target[2] - start[2]) / length
+    return (
+        start[0] + ux * distance,
+        start[1] + uy * distance,
+        start[2] + uz * distance,
+    )
+
+
+def _endpoint_trim(length: float, endpoint_clearance: float) -> float:
+    return max(
+        0.0,
+        min(
+            float(endpoint_clearance),
+            max(0.0, length * MAX_ENDPOINT_TRIM_FRACTION),
+        ),
+    )
+
+
+def _segment_length(
+    start: tuple[float, float, float],
+    end: tuple[float, float, float],
+) -> float:
+    return (
+        (end[0] - start[0]) ** 2
+        + (end[1] - start[1]) ** 2
+        + (end[2] - start[2]) ** 2
+    ) ** 0.5
 
 
 def _route_points(
@@ -747,30 +858,30 @@ def _route_fitting_shapes(
         )
     elif primitive_family == "wrist_elbow_cylinder":
         fittings.append(
-            _route_flange_disk(b, points[0], first_axis, width * 0.78, height * 0.35)
+            _route_flange_disk(b, points[0], first_axis, width * 0.42, height * 0.32)
         )
         fittings.append(
-            _route_flange_disk(b, points[-1], last_axis, width * 0.78, height * 0.35)
+            _route_flange_disk(b, points[-1], last_axis, width * 0.42, height * 0.32)
         )
         fittings.append(
-            _route_flange_disk(b, points[-1], last_axis, width * 0.52, height * 0.58)
+            _route_flange_disk(b, points[-1], last_axis, width * 0.3, height * 0.5)
         )
     elif primitive_family == "wrist_tool_flange":
         fittings.append(
-            _route_flange_disk(b, points[0], first_axis, width * 0.82, height * 0.4)
+            _route_flange_disk(b, points[0], first_axis, width * 0.42, height * 0.35)
         )
         fittings.append(
-            _route_flange_disk(b, points[-1], last_axis, width * 1.0, height * 0.48)
+            _route_flange_disk(b, points[-1], last_axis, width * 0.45, height * 0.4)
         )
         fittings.append(
-            _route_flange_disk(b, points[-1], last_axis, width * 0.5, height * 0.75)
+            _route_flange_disk(b, points[-1], last_axis, width * 0.28, height * 0.65)
         )
     elif primitive_family == "terminal_tool_spacer":
         fittings.append(
-            _route_flange_disk(b, points[0], first_axis, width * 0.7, height * 0.38)
+            _route_flange_disk(b, points[0], first_axis, width * 0.48, height * 0.38)
         )
         fittings.append(
-            _route_flange_disk(b, points[-1], last_axis, width * 0.82, height * 0.42)
+            _route_flange_disk(b, points[-1], last_axis, width * 0.55, height * 0.42)
         )
     return fittings
 
@@ -946,6 +1057,25 @@ def _joint_primitive_family(axis_role: str | None, morphology: str | None) -> st
     if value in {"tool_flange_joint", "tool_roll"}:
         return "tool_flange_joint"
     return "generic_joint"
+
+
+def _joint_dimensions_for_family(
+    primitive_family: str,
+    *,
+    radius: float,
+    length: float,
+) -> tuple[float, float]:
+    if primitive_family == "base_yaw_pedestal":
+        return (radius, length)
+    if primitive_family == "shoulder_block":
+        return (radius * 0.95, length * 0.95)
+    if primitive_family == "elbow_block":
+        return (radius * 0.88, length * 0.85)
+    if primitive_family == "wrist_compact":
+        return (radius * 0.62, length * 0.68)
+    if primitive_family == "tool_flange_joint":
+        return (radius * 0.58, length * 0.58)
+    return (radius, length)
 
 
 def _link_primitive_family(

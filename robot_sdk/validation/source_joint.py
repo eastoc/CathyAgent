@@ -12,8 +12,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from robot_sdk.cad.bbox import CadBoundingBox, bounding_box_from_cad_object
+
 
 SourceJointValidationSeverity = Literal["pass", "warning", "error"]
+
+SOURCE_ADJACENT_BBOX_OVERLAP_ERROR_RATIO = 0.40
+SOURCE_NONADJACENT_BBOX_OVERLAP_ERROR_RATIO = 0.45
+SOURCE_BBOX_OVERLAP_REPORT_LIMIT = 12
 
 
 @dataclass(frozen=True)
@@ -64,6 +70,7 @@ def validate_source_joint_assembly(
     source_mates = _source_mates(cad_result)
     _validate_source_mate_records(issues, source_mates)
     _validate_source_chain_graph(issues, part_ids, source_mates)
+    _validate_source_part_bbox_interference(issues, cad_result, source_mates)
     _validate_source_step_package_gate(issues, step_package_result)
     _validate_source_review_bbox_gate(issues, cad_result, step_package_result)
     return SourceJointValidationReport(issues=issues)
@@ -347,6 +354,131 @@ def _validate_source_review_bbox_gate(
         ),
         details,
     )
+
+
+def _validate_source_part_bbox_interference(
+    issues: list[SourceJointValidationIssue],
+    cad_result: Any | None,
+    source_mates: list[dict[str, Any]],
+) -> None:
+    catalog = getattr(cad_result, "part_catalog", None)
+    part_ids_method = getattr(catalog, "part_ids", None)
+    require_method = getattr(catalog, "require", None)
+    if not callable(part_ids_method) or not callable(require_method):
+        _add(
+            issues,
+            "source_joint_part_bbox_unavailable",
+            "warning",
+            "Source-joint part catalog is unavailable, so part-level bbox interference screening was skipped.",
+        )
+        return
+
+    bboxes: dict[str, CadBoundingBox] = {}
+    missing: list[str] = []
+    for part_id in [str(item) for item in part_ids_method()]:
+        try:
+            part = require_method(part_id)
+            bbox = bounding_box_from_cad_object(getattr(part, "solid", None))
+        except Exception:
+            bbox = None
+        if bbox is None or not bbox.valid:
+            missing.append(part_id)
+            continue
+        bboxes[part_id] = bbox
+
+    if missing:
+        _add(
+            issues,
+            "source_joint_part_bbox_partial",
+            "warning",
+            "Some source-joint parts do not expose valid bboxes for interference screening.",
+            {"missing_part_bbox_ids": missing},
+        )
+
+    adjacent_pairs = {
+        tuple(sorted(edge))
+        for edge in _source_edges(source_mates)
+        if len(edge) == 2
+    }
+    overlap_failures: list[dict[str, object]] = []
+    overlap_observations: list[dict[str, object]] = []
+    part_items = list(bboxes.items())
+    for index, (left_id, left_bbox) in enumerate(part_items):
+        for right_id, right_bbox in part_items[index + 1 :]:
+            overlap_volume = _bbox_intersection_volume(left_bbox, right_bbox)
+            if overlap_volume <= 1e-6:
+                continue
+            left_volume = _bbox_volume(left_bbox)
+            right_volume = _bbox_volume(right_bbox)
+            smaller_volume = min(left_volume, right_volume)
+            if smaller_volume <= 1e-6:
+                continue
+            ratio = overlap_volume / smaller_volume
+            pair = tuple(sorted((left_id, right_id)))
+            adjacent = pair in adjacent_pairs
+            threshold = (
+                SOURCE_ADJACENT_BBOX_OVERLAP_ERROR_RATIO
+                if adjacent
+                else SOURCE_NONADJACENT_BBOX_OVERLAP_ERROR_RATIO
+            )
+            item = {
+                "left_part_id": left_id,
+                "right_part_id": right_id,
+                "adjacent_source_mate": adjacent,
+                "overlap_volume": overlap_volume,
+                "overlap_to_smaller_bbox_ratio": ratio,
+                "threshold": threshold,
+            }
+            if _is_allowed_mount_overlap(pair):
+                overlap_observations.append({**item, "allowed": True})
+                continue
+            if ratio >= threshold:
+                overlap_failures.append(item)
+            else:
+                overlap_observations.append(item)
+
+    details = {
+        "checked_part_count": len(bboxes),
+        "missing_part_bbox_ids": missing,
+        "adjacent_overlap_error_ratio": SOURCE_ADJACENT_BBOX_OVERLAP_ERROR_RATIO,
+        "nonadjacent_overlap_error_ratio": SOURCE_NONADJACENT_BBOX_OVERLAP_ERROR_RATIO,
+        "overlap_failures": overlap_failures[:SOURCE_BBOX_OVERLAP_REPORT_LIMIT],
+        "overlap_observation_count": len(overlap_observations),
+    }
+    if overlap_failures:
+        _add(
+            issues,
+            "source_joint_part_bbox_interference",
+            "error",
+            "Source-joint assembly has excessive part-level bbox overlap; this usually indicates visible interference or pass-through geometry.",
+            details,
+        )
+        return
+
+    _add(
+        issues,
+        "source_joint_part_bbox_clearance_screened",
+        "pass",
+        "Source-joint part-level bbox overlap stayed within coarse clearance thresholds.",
+        details,
+    )
+
+
+def _bbox_volume(bbox: CadBoundingBox) -> float:
+    return max(0.0, bbox.xlen) * max(0.0, bbox.ylen) * max(0.0, bbox.zlen)
+
+
+def _bbox_intersection_volume(left: CadBoundingBox, right: CadBoundingBox) -> float:
+    xlen = min(left.xmax, right.xmax) - max(left.xmin, right.xmin)
+    ylen = min(left.ymax, right.ymax) - max(left.ymin, right.ymin)
+    zlen = min(left.zmax, right.zmax) - max(left.zmin, right.zmin)
+    if xlen <= 0.0 or ylen <= 0.0 or zlen <= 0.0:
+        return 0.0
+    return xlen * ylen * zlen
+
+
+def _is_allowed_mount_overlap(pair: tuple[str, str]) -> bool:
+    return pair == ("J1", "base")
 
 
 def _review_bbox_metrics(name: str, bbox: Any | None) -> dict[str, object]:

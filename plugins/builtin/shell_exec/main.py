@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -123,7 +124,14 @@ class ShellExecPlugin(ToolPlugin):
 
     def _build_env(self, allowlist: list[Any]) -> dict[str, str]:
         # 默认只给 PATH，避免把宿主机敏感环境变量泄露给命令进程。
-        env: dict[str, str] = {"PATH": os.environ.get("PATH", "")}
+        python_bin = str(Path(sys.executable).resolve().parent)
+        current_path = os.environ.get("PATH", "")
+        path = (
+            f"{python_bin}{os.pathsep}{current_path}"
+            if current_path
+            else python_bin
+        )
+        env: dict[str, str] = {"PATH": path}
         for k in allowlist:
             key = str(k)
             if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", key):
@@ -140,4 +148,3 @@ class ShellExecPlugin(ToolPlugin):
         for pat in _DANGEROUS_PATTERNS:
             if pat.search(command):
                 raise PluginError(f"命令命中高危规则，已阻止: {command}")
-
