@@ -19,7 +19,7 @@ from .agent import Agent, AgentConfig  # noqa: E402
 from .context import ContextAssembler  # noqa: E402
 from .hooks import HookEvent, HookManager, SESSION_START  # noqa: E402
 from .logger import configure_logging, get_logger  # noqa: E402
-from .llm import LLMClient  # noqa: E402
+from .model_clients import build_model_client  # noqa: E402
 from .mcp import (  # noqa: E402
     HAS_FASTMCP,
     McpError,
@@ -190,33 +190,7 @@ def build_runtime(cfg: dict | None = None) -> tuple[Agent, SessionStore, HookMan
             f"请在 config/.env 中配置对应环境变量（见 config.yaml → LLM.{provider}.api_key）后重试。"
         )
 
-    llm = LLMClient(
-        api_key=llm_conf["api_key"],
-        base_url=llm_conf["api_base"],
-        model=llm_conf["model"],
-        temperature=float(llm_conf.get("temperature", 0.7)),
-        max_tokens=int(llm_conf.get("max_tokens") or 4096),
-        timeout=float(
-            llm_conf.get("timeout_sec")
-            if llm_conf.get("timeout_sec") is not None
-            else 60
-        ),
-        max_retries=int(
-            llm_conf.get("max_retries")
-            if llm_conf.get("max_retries") is not None
-            else 2
-        ),
-        retry_backoff_initial_sec=float(
-            llm_conf.get("retry_backoff_initial_sec")
-            if llm_conf.get("retry_backoff_initial_sec") is not None
-            else 1
-        ),
-        retry_backoff_max_sec=float(
-            llm_conf.get("retry_backoff_max_sec")
-            if llm_conf.get("retry_backoff_max_sec") is not None
-            else 20
-        ),
-    )
+    llm = build_model_client(llm_conf)
 
     plugins_dirs = [
         _PROJECT_ROOT / "plugins" / "builtin",

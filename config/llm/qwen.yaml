@@ -1,4 +1,6 @@
-type: openai_compatible
+# Qwen Cloud、vLLM 和 SGLang 均可复用该协议客户端；Qwen3.5 视觉场景后续改走
+# 专用 DashScope 多模态客户端，不在这里静默降级。
+type: openai_compatible_chat
 api_key: ${QWEN_API_KEY}
 api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
 model: qwen3.7-max

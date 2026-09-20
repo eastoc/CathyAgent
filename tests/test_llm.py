@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +18,7 @@ from cathy.llm import (  # noqa: E402
     uses_max_completion_tokens,
 )
 from cathy.llm_errors import LLMCallError  # noqa: E402
+from cathy.contracts import ModelClient, ModelRequest  # noqa: E402
 
 
 class _RetryableServerError(Exception):
@@ -58,7 +60,7 @@ class LLMClientTest(unittest.TestCase):
         apply_temperature(legacy_kwargs, model="gpt-4o-mini", temperature=0.7)
         self.assertEqual(legacy_kwargs, {"temperature": 0.7})
 
-    @patch("cathy.llm.OpenAI")
+    @patch("cathy.model_clients.openai_compatible_chat.OpenAI")
     def test_chat_uses_max_completion_tokens_for_gpt5(self, openai_cls: MagicMock) -> None:
         client = LLMClient(
             api_key="test-key",
@@ -78,7 +80,7 @@ class LLMClientTest(unittest.TestCase):
         self.assertNotIn("max_tokens", kwargs)
         self.assertNotIn("temperature", kwargs)
 
-    @patch("cathy.llm.OpenAI")
+    @patch("cathy.model_clients.openai_compatible_chat.OpenAI")
     def test_chat_uses_max_tokens_for_gpt4o(self, openai_cls: MagicMock) -> None:
         client = LLMClient(
             api_key="test-key",
@@ -98,7 +100,7 @@ class LLMClientTest(unittest.TestCase):
         self.assertEqual(kwargs["temperature"], 0.7)
         self.assertNotIn("max_completion_tokens", kwargs)
 
-    @patch("cathy.llm.OpenAI")
+    @patch("cathy.model_clients.openai_compatible_chat.OpenAI")
     def test_chat_retries_retryable_errors(self, openai_cls: MagicMock) -> None:
         client = LLMClient(
             api_key="test-key",
@@ -116,7 +118,7 @@ class LLMClientTest(unittest.TestCase):
         self.assertIs(actual, expected)
         self.assertEqual(completions.create.call_count, 2)
 
-    @patch("cathy.llm.OpenAI")
+    @patch("cathy.model_clients.openai_compatible_chat.OpenAI")
     def test_chat_raises_structured_failure_after_retries(self, openai_cls: MagicMock) -> None:
         client = LLMClient(
             api_key="test-key",
@@ -135,6 +137,51 @@ class LLMClientTest(unittest.TestCase):
         self.assertTrue(ctx.exception.failure.retryable)
         self.assertEqual(ctx.exception.failure.stage, "test_stage")
         self.assertEqual(ctx.exception.failure.attempts, 2)
+
+    @patch("cathy.model_clients.openai_compatible_chat.OpenAI")
+    def test_generate_normalizes_text_and_tool_calls(self, openai_cls: MagicMock) -> None:
+        client = LLMClient(
+            api_key="test-key",
+            base_url="https://api.openai.com/v1",
+            model="qwen-plus",
+        )
+        self.assertIsInstance(client, ModelClient)
+
+        message = SimpleNamespace(
+            content="准备调用工具",
+            reasoning_content="内部推理",
+            tool_calls=[
+                SimpleNamespace(
+                    id="call_1",
+                    function=SimpleNamespace(
+                        name="echo",
+                        arguments='{"msg": "你好"}',
+                    ),
+                )
+            ],
+        )
+        openai_cls.return_value.chat.completions.create.return_value = SimpleNamespace(
+            choices=[SimpleNamespace(message=message)]
+        )
+
+        response = client.generate(
+            ModelRequest(
+                messages=[{"role": "user", "content": "hi"}],
+                tools=[{"type": "function", "function": {"name": "echo"}}],
+                stage="contract_test",
+            )
+        )
+
+        self.assertEqual(response.text, "准备调用工具")
+        self.assertEqual(response.reasoning_content, "内部推理")
+        self.assertEqual(len(response.tool_calls), 1)
+        self.assertEqual(response.tool_calls[0].id, "call_1")
+        self.assertEqual(response.tool_calls[0].name, "echo")
+        self.assertEqual(response.tool_calls[0].arguments, {"msg": "你好"})
+
+        kwargs = openai_cls.return_value.chat.completions.create.call_args.kwargs
+        self.assertEqual(kwargs["model"], "qwen-plus")
+        self.assertEqual(kwargs["tool_choice"], "auto")
 
 
 if __name__ == "__main__":
