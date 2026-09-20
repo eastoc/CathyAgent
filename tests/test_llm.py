@@ -18,7 +18,7 @@ from cathy.llm import (  # noqa: E402
     uses_max_completion_tokens,
 )
 from cathy.llm_errors import LLMCallError  # noqa: E402
-from cathy.contracts import ModelClient, ModelRequest  # noqa: E402
+from cathy.contracts import ModelClient, ModelRequest, ModelTool  # noqa: E402
 
 
 class _RetryableServerError(Exception):
@@ -167,13 +167,13 @@ class LLMClientTest(unittest.TestCase):
         response = client.generate(
             ModelRequest(
                 messages=[{"role": "user", "content": "hi"}],
-                tools=[{"type": "function", "function": {"name": "echo"}}],
+                tools=[ModelTool(name="echo", description="", input_schema={})],
                 stage="contract_test",
             )
         )
 
         self.assertEqual(response.text, "准备调用工具")
-        self.assertEqual(response.reasoning_content, "内部推理")
+        self.assertEqual(response.reasoning, "内部推理")
         self.assertEqual(len(response.tool_calls), 1)
         self.assertEqual(response.tool_calls[0].id, "call_1")
         self.assertEqual(response.tool_calls[0].name, "echo")
@@ -182,6 +182,66 @@ class LLMClientTest(unittest.TestCase):
         kwargs = openai_cls.return_value.chat.completions.create.call_args.kwargs
         self.assertEqual(kwargs["model"], "qwen-plus")
         self.assertEqual(kwargs["tool_choice"], "auto")
+        self.assertEqual(kwargs["tools"][0]["function"]["name"], "echo")
+
+    @patch("cathy.model_clients.openai_compatible_chat.OpenAI")
+    def test_generate_converts_neutral_history_to_chat_wire_format(
+        self,
+        openai_cls: MagicMock,
+    ) -> None:
+        client = LLMClient(
+            api_key="test-key",
+            base_url="https://api.example/v1",
+            model="deepseek-chat",
+        )
+        openai_cls.return_value.chat.completions.create.return_value = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="done",
+                        tool_calls=None,
+                        reasoning_content=None,
+                    )
+                )
+            ]
+        )
+
+        client.generate(
+            ModelRequest(
+                messages=[
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning": "内部推理",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "name": "echo",
+                                "arguments": {"msg": "hi"},
+                                "raw_arguments": '{"msg":"hi"}',
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "content": "echo:hi",
+                        "tool_call_id": "call_1",
+                        "name": "echo",
+                    },
+                ]
+            )
+        )
+
+        messages = openai_cls.return_value.chat.completions.create.call_args.kwargs[
+            "messages"
+        ]
+        self.assertEqual(messages[0]["reasoning_content"], "内部推理")
+        self.assertEqual(messages[0]["tool_calls"][0]["function"]["name"], "echo")
+        self.assertEqual(
+            messages[0]["tool_calls"][0]["function"]["arguments"],
+            '{"msg": "hi"}',
+        )
+        self.assertEqual(messages[1]["tool_call_id"], "call_1")
 
 
 if __name__ == "__main__":

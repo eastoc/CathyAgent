@@ -15,12 +15,12 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +29,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from cathy.agent import Agent, AgentConfig  # noqa: E402
 from cathy.context import ContextAssembler  # noqa: E402
+from cathy.contracts import ModelRequest, ModelResponse, ModelToolCall  # noqa: E402
 from cathy.hooks import HookDecision, HookEvent, HookManager  # noqa: E402
 from cathy.hooks.events import (  # noqa: E402
     POST_TOOL_USE,
@@ -93,23 +94,22 @@ class _ToolCall:
 
 
 def _build_response(text: str = "", tool_calls: list[_ToolCall] | None = None) -> Any:
-    if tool_calls:
-        wire = [
-            SimpleNamespace(
+    return ModelResponse(
+        text=text,
+        tool_calls=tuple(
+            ModelToolCall(
                 id=tc.id,
-                type="function",
-                function=SimpleNamespace(name=tc.name, arguments=tc.arguments),
+                name=tc.name,
+                arguments=json.loads(tc.arguments),
+                raw_arguments=tc.arguments,
             )
-            for tc in tool_calls
-        ]
-        msg = SimpleNamespace(content=text or "", tool_calls=wire, reasoning_content=None)
-    else:
-        msg = SimpleNamespace(content=text, tool_calls=None, reasoning_content=None)
-    return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+            for tc in tool_calls or []
+        ),
+    )
 
 
 class _ScriptedLLM:
-    """按预设脚本逐轮返回。`saw_messages` 记录每次 chat() 入参的 messages 副本。"""
+    """按预设脚本逐轮返回。`saw_messages` 记录每次 generate() 的消息副本。"""
 
     model = "fake"
 
@@ -117,8 +117,8 @@ class _ScriptedLLM:
         self._script = list(script)
         self.saw_messages: list[list[dict]] = []
 
-    def chat(self, messages: list[dict[str, Any]], *, tools=None, tool_choice=None):
-        self.saw_messages.append([dict(m) for m in messages])
+    def generate(self, request: ModelRequest) -> ModelResponse:
+        self.saw_messages.append([dict(m) for m in request.messages])
         if not self._script:
             raise AssertionError("脚本耗尽：LLM 被多调了一次")
         return self._script.pop(0)

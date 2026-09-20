@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from cathy.contracts import ModelRequest  # noqa: E402
+from cathy.contracts import ModelRequest, ModelTool, ModelTurnState  # noqa: E402
 from cathy.llm_errors import LLMCallError  # noqa: E402
 from cathy.model_clients.openai_responses import (  # noqa: E402
     OpenAIResponsesClient,
@@ -46,7 +46,9 @@ class OpenAIResponsesClientTest(unittest.TestCase):
         )
 
         self.assertEqual(response.text, "完成")
-        self.assertEqual(response.continuation_id, "resp_1")
+        self.assertIsNotNone(response.next_turn_state)
+        assert response.next_turn_state is not None
+        self.assertEqual(response.next_turn_state.value, "resp_1")
         kwargs = openai_cls.return_value.responses.create.call_args.kwargs
         self.assertEqual(kwargs["model"], "gpt-6-astra")
         self.assertEqual(kwargs["reasoning"], {"effort": "low"})
@@ -82,17 +84,14 @@ class OpenAIResponsesClientTest(unittest.TestCase):
             ModelRequest(
                 messages=[{"role": "user", "content": "移动机械臂"}],
                 tools=[
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "move_arm",
-                            "description": "移动末端",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {"x": {"type": "number"}},
-                            },
+                    ModelTool(
+                        name="move_arm",
+                        description="移动末端",
+                        input_schema={
+                            "type": "object",
+                            "properties": {"x": {"type": "number"}},
                         },
-                    }
+                    )
                 ],
             )
         )
@@ -127,11 +126,9 @@ class OpenAIResponsesClientTest(unittest.TestCase):
                         "tool_calls": [
                             {
                                 "id": "call_1",
-                                "type": "function",
-                                "function": {
-                                    "name": "echo",
-                                    "arguments": "{}",
-                                },
+                                "name": "echo",
+                                "arguments": {},
+                                "raw_arguments": "{}",
                             }
                         ],
                     },
@@ -141,8 +138,8 @@ class OpenAIResponsesClientTest(unittest.TestCase):
                         "content": {"ok": True},
                     }
                 ],
-                continuation_id="resp_1",
-                continuation_messages=[
+                turn_state=ModelTurnState("resp_1"),
+                delta_messages=[
                     {
                         "role": "tool",
                         "tool_call_id": "call_1",
@@ -198,7 +195,7 @@ class OpenAIResponsesClientTest(unittest.TestCase):
 
     def test_rejects_tool_without_name(self) -> None:
         with self.assertRaisesRegex(ValueError, "缺少 name"):
-            convert_response_tool({"type": "function", "function": {}})
+            convert_response_tool(ModelTool(name="", description="", input_schema={}))
 
     @patch("cathy.model_clients.openai_responses.OpenAI")
     def test_retries_retryable_errors(self, openai_cls: MagicMock) -> None:

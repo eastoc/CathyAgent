@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS messages (
     tool_calls_json TEXT,
     tool_call_id TEXT,
     name TEXT,
+    reasoning TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
@@ -50,6 +51,12 @@ class SessionStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON;")
         self._conn.executescript(_SCHEMA)
+        columns = {
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(messages)").fetchall()
+        }
+        if "reasoning" not in columns:
+            self._conn.execute("ALTER TABLE messages ADD COLUMN reasoning TEXT")
         self._conn.commit()
 
     # ---------- Session CRUD ---------- #
@@ -107,8 +114,8 @@ class SessionStore:
         now = message.created_at or _now_iso()
         self._conn.execute(
             "INSERT INTO messages "
-            "(session_id, role, content, tool_calls_json, tool_call_id, name, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(session_id, role, content, tool_calls_json, tool_call_id, name, reasoning, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id,
                 message.role,
@@ -116,6 +123,7 @@ class SessionStore:
                 json.dumps(message.tool_calls, ensure_ascii=False) if message.tool_calls else None,
                 message.tool_call_id,
                 message.name,
+                message.reasoning,
                 now,
             ),
         )
@@ -127,7 +135,7 @@ class SessionStore:
 
     def _load_messages(self, session_id: str) -> list[Message]:
         rows = self._conn.execute(
-            "SELECT role, content, tool_calls_json, tool_call_id, name, created_at "
+            "SELECT role, content, tool_calls_json, tool_call_id, name, reasoning, created_at "
             "FROM messages WHERE session_id = ? ORDER BY id ASC",
             (session_id,),
         ).fetchall()
@@ -140,6 +148,7 @@ class SessionStore:
                     tool_calls=json.loads(r["tool_calls_json"]) if r["tool_calls_json"] else None,
                     tool_call_id=r["tool_call_id"],
                     name=r["name"],
+                    reasoning=r["reasoning"],
                     created_at=r["created_at"],
                 )
             )

@@ -8,7 +8,13 @@ from typing import Any, Mapping, Sequence
 
 from openai import OpenAI
 
-from ..contracts import ModelRequest, ModelResponse, ModelToolCall
+from ..contracts import (
+    ModelRequest,
+    ModelResponse,
+    ModelTool,
+    ModelToolCall,
+    ModelTurnState,
+)
 from ..llm_errors import LLMCallError, classify_llm_exception
 
 
@@ -58,8 +64,8 @@ class OpenAIResponsesClient:
     def generate(self, request: ModelRequest) -> ModelResponse:
         """执行一次 Responses 请求并返回供应商无关的模型输出。"""
         input_messages = request.messages
-        if request.continuation_id and request.continuation_messages is not None:
-            input_messages = request.continuation_messages
+        if request.turn_state and request.delta_messages is not None:
+            input_messages = request.delta_messages
         kwargs: dict[str, Any] = {
             "model": self.model,
             "input": convert_response_input(input_messages),
@@ -69,8 +75,8 @@ class OpenAIResponsesClient:
         }
         if self.max_output_tokens is not None:
             kwargs["max_output_tokens"] = self.max_output_tokens
-        if request.continuation_id:
-            kwargs["previous_response_id"] = request.continuation_id
+        if request.turn_state:
+            kwargs["previous_response_id"] = str(request.turn_state.value)
         if request.tools:
             kwargs["tools"] = [convert_response_tool(tool) for tool in request.tools]
             kwargs["tool_choice"] = convert_tool_choice(request.tool_choice)
@@ -101,23 +107,20 @@ class OpenAIResponsesClient:
             time.sleep(delay)
 
 
-def convert_response_tool(tool: Mapping[str, Any]) -> dict[str, Any]:
-    """把 Chat Completions 函数 schema 转为 Responses 扁平 schema。"""
-    function = tool.get("function")
-    source = function if isinstance(function, Mapping) else tool
-    name = source.get("name")
-    if not name:
+def convert_response_tool(tool: ModelTool) -> dict[str, Any]:
+    """把内部工具定义转换为 Responses function schema。"""
+    if not tool.name:
         raise ValueError("工具 schema 缺少 name")
 
     converted: dict[str, Any] = {
         "type": "function",
-        "name": str(name),
-        "parameters": dict(source.get("parameters") or {}),
+        "name": tool.name,
+        "parameters": dict(tool.input_schema),
     }
-    if source.get("description") is not None:
-        converted["description"] = str(source["description"])
-    if source.get("strict") is not None:
-        converted["strict"] = bool(source["strict"])
+    if tool.description:
+        converted["description"] = tool.description
+    if tool.strict is not None:
+        converted["strict"] = tool.strict
     return converted
 
 
@@ -259,8 +262,12 @@ def normalize_responses_response(response: Any) -> ModelResponse:
     return ModelResponse(
         text="".join(text_parts),
         tool_calls=tuple(tool_calls),
-        reasoning_content="\n".join(reasoning_parts) or None,
-        continuation_id=str(getattr(response, "id", None) or "") or None,
+        reasoning="\n".join(reasoning_parts) or None,
+        next_turn_state=(
+            ModelTurnState(str(response.id))
+            if getattr(response, "id", None)
+            else None
+        ),
         raw=response,
     )
 

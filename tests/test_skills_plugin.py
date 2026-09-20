@@ -50,11 +50,10 @@ class SkillsPluginTest(unittest.TestCase):
         good = registry.call("read_skill", {"name": "write_blog"})
         self.assertIn("正文-write_blog", good)
 
-    def test_schema_only_one_function_tool(self) -> None:
+    def test_registry_exposes_one_model_tool(self) -> None:
         registry = PluginRegistry(plugins_dirs=[])
         registry.register_internal_plugin(build_skills_manifest(), self.plugin)
-        schemas = registry.openai_schemas()
-        names = [s["function"]["name"] for s in schemas]
+        names = [tool.name for tool in registry.model_tools()]
         self.assertEqual(names, ["read_skill"])
 
 

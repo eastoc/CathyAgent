@@ -69,20 +69,20 @@ class ToolViewTest(unittest.TestCase):
 
     def test_view_allowed_only(self) -> None:
         view = ToolView(self.reg, allowed=["alpha", "gamma"])
-        names = sorted(s["function"]["name"] for s in view.openai_schemas())
+        names = sorted(tool.name for tool in view.model_tools())
         self.assertEqual(names, ["alpha", "gamma"])
         self.assertEqual(view.call("alpha", {"msg": "hi"}), "alpha:hi")
         self.assertIn("不在", view.call("beta", {"msg": "x"}))
 
     def test_view_blocked_overrides_allowed(self) -> None:
         view = ToolView(self.reg, allowed=["alpha", "beta"], blocked=["beta"])
-        names = sorted(s["function"]["name"] for s in view.openai_schemas())
+        names = sorted(tool.name for tool in view.model_tools())
         self.assertEqual(names, ["alpha"])
         self.assertIn("不在", view.call("beta", {"msg": "x"}))
 
     def test_view_default_inherits_all(self) -> None:
         view = ToolView(self.reg)
-        names = sorted(s["function"]["name"] for s in view.openai_schemas())
+        names = sorted(tool.name for tool in view.model_tools())
         self.assertEqual(names, ["alpha", "beta", "gamma"])
 
     def test_view_invalid_args_propagate(self) -> None:

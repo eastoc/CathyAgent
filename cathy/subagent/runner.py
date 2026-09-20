@@ -12,14 +12,14 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from ..contracts import ModelClient, ModelToolCall
+from ..contracts import ModelClient, ModelTool, ModelToolCall
 from ..llm_errors import LLMCallError
 from ..model_clients import generate_model_response
 from .base import SubagentResult
 
 
 class _ToolsLike(Protocol):
-    def openai_schemas(self) -> list[dict]: ...
+    def model_tools(self) -> list[ModelTool]: ...
     def call(self, tool_name: str, params: dict[str, Any]) -> str: ...
 
 
@@ -27,11 +27,9 @@ def _tool_calls_to_dicts(tool_calls: tuple[ModelToolCall, ...]) -> list[dict]:
     return [
         {
             "id": tc.id,
-            "type": "function",
-            "function": {
-                "name": tc.name,
-                "arguments": tc.raw_arguments,
-            },
+            "name": tc.name,
+            "arguments": dict(tc.arguments),
+            "raw_arguments": tc.raw_arguments,
         }
         for tc in tool_calls
     ]
@@ -64,19 +62,19 @@ class SubagentRunner:
             {"role": "user", "content": user_input},
         ]
         result = SubagentResult(final_answer="")
-        schemas = self.tools.openai_schemas() or None
-        continuation_id: str | None = None
-        continuation_messages: list[dict[str, Any]] | None = None
+        model_tools = self.tools.model_tools() or None
+        turn_state = None
+        delta_messages: list[dict[str, Any]] | None = None
 
         for step in range(self.max_steps):
             try:
                 response = generate_model_response(
                     self.llm,
                     messages,
-                    tools=schemas,
+                    tools=model_tools,
                     stage="subagent_runner",
-                    continuation_id=continuation_id,
-                    continuation_messages=continuation_messages,
+                    turn_state=turn_state,
+                    delta_messages=delta_messages,
                 )
             except LLMCallError as exc:
                 result.final_answer = (
@@ -100,11 +98,8 @@ class SubagentRunner:
                 "content": response.text or "",
                 "tool_calls": tool_calls_dicts,
             }
-            # DeepSeek thinking 模式：reasoning_content 必须随 assistant.tool_calls
-            # 一起回灌到下一轮 API，否则服务端 400。
-            reasoning = response.reasoning_content
-            if reasoning:
-                assistant_dict["reasoning_content"] = reasoning
+            if response.reasoning:
+                assistant_dict["reasoning"] = response.reasoning
             messages.append(assistant_dict)
             result.add(
                 "assistant_tool_calls",
@@ -132,8 +127,8 @@ class SubagentRunner:
                 messages.append(tool_message)
                 tool_result_messages.append(tool_message)
 
-            continuation_id = response.continuation_id
-            continuation_messages = tool_result_messages
+            turn_state = response.next_turn_state
+            delta_messages = tool_result_messages
 
         result.final_answer = f"[subagent] 已达到最大步数 {self.max_steps}，提前结束。"
         result.finished = False

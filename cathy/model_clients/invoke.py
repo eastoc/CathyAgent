@@ -4,19 +4,23 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from ..contracts import ModelRequest, ModelResponse
-from .openai_compatible_chat import normalize_chat_response
+from ..contracts import ModelRequest, ModelResponse, ModelTool, ModelTurnState
+from .openai_compatible_chat import (
+    convert_chat_messages,
+    convert_chat_tool,
+    normalize_chat_response,
+)
 
 
 def generate_model_response(
     llm: Any,
     messages: Sequence[dict[str, Any]],
     *,
-    tools: Sequence[dict[str, Any]] | None = None,
+    tools: Sequence[ModelTool] | None = None,
     tool_choice: str | None = "auto",
     stage: str,
-    continuation_id: str | None = None,
-    continuation_messages: Sequence[dict[str, Any]] | None = None,
+    turn_state: ModelTurnState | None = None,
+    delta_messages: Sequence[dict[str, Any]] | None = None,
 ) -> ModelResponse:
     """调用统一 ``ModelClient``；旧 ``chat`` 对象只用于迁移期兼容。"""
     generate = getattr(llm, "generate", None)
@@ -27,8 +31,8 @@ def generate_model_response(
                 tools=tools,
                 tool_choice=tool_choice,
                 stage=stage,
-                continuation_id=continuation_id,
-                continuation_messages=continuation_messages,
+                turn_state=turn_state,
+                delta_messages=delta_messages,
             )
         )
 
@@ -37,8 +41,8 @@ def generate_model_response(
         raise TypeError("模型客户端必须实现 generate(ModelRequest)")
     try:
         raw_response = chat(
-            list(messages),
-            tools=list(tools) if tools is not None else None,
+            convert_chat_messages(messages),
+            tools=[convert_chat_tool(tool) for tool in tools] if tools else None,
             tool_choice=tool_choice,
             stage=stage,
         )
@@ -46,8 +50,8 @@ def generate_model_response(
         if "stage" not in str(exc):
             raise
         raw_response = chat(
-            list(messages),
-            tools=list(tools) if tools is not None else None,
+            convert_chat_messages(messages),
+            tools=[convert_chat_tool(tool) for tool in tools] if tools else None,
             tool_choice=tool_choice,
         )
     return normalize_chat_response(raw_response)

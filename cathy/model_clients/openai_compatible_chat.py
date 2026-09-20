@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from openai import OpenAI
 
-from ..contracts import ModelRequest, ModelResponse, ModelToolCall
+from ..contracts import ModelRequest, ModelResponse, ModelTool, ModelToolCall
 from ..llm_errors import LLMCallError, classify_llm_exception
 
 
@@ -111,9 +111,9 @@ class OpenAICompatibleChatClient:
     def generate(self, request: ModelRequest) -> ModelResponse:
         """执行请求并把 Chat Completions 响应归一化为模型协议。"""
         response = self.chat(
-            [dict(message) for message in request.messages],
+            convert_chat_messages(request.messages),
             tools=(
-                [dict(tool) for tool in request.tools]
+                [convert_chat_tool(tool) for tool in request.tools]
                 if request.tools is not None
                 else None
             ),
@@ -143,6 +143,61 @@ class OpenAICompatibleChatClient:
         delay = min(delay, self.retry_backoff_max_sec)
         if delay > 0:
             time.sleep(delay)
+
+
+def convert_chat_messages(
+    messages: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """把内部模型消息转换为 Chat Completions 消息。"""
+    converted: list[dict[str, Any]] = []
+    for message in messages:
+        item: dict[str, Any] = {
+            "role": str(message.get("role") or "user"),
+            "content": message.get("content") or "",
+        }
+        if message.get("tool_call_id"):
+            item["tool_call_id"] = str(message["tool_call_id"])
+        if message.get("name"):
+            item["name"] = str(message["name"])
+        if message.get("reasoning"):
+            item["reasoning_content"] = str(message["reasoning"])
+        tool_calls = message.get("tool_calls") or []
+        if tool_calls:
+            item["tool_calls"] = [_convert_chat_tool_call(call) for call in tool_calls]
+        converted.append(item)
+    return converted
+
+
+def convert_chat_tool(tool: ModelTool) -> dict[str, Any]:
+    """把内部工具定义转换为 Chat Completions function schema。"""
+    function: dict[str, Any] = {
+        "name": tool.name,
+        "description": tool.description,
+        "parameters": dict(tool.input_schema),
+    }
+    if tool.strict is not None:
+        function["strict"] = tool.strict
+    return {"type": "function", "function": function}
+
+
+def _convert_chat_tool_call(tool_call: Any) -> dict[str, Any]:
+    if not isinstance(tool_call, Mapping):
+        raise TypeError("内部 tool_call 必须是映射")
+    function = tool_call.get("function")
+    source = function if isinstance(function, Mapping) else tool_call
+    arguments = source.get("arguments")
+    if arguments is None:
+        arguments = source.get("raw_arguments") or "{}"
+    if isinstance(arguments, Mapping):
+        arguments = json.dumps(dict(arguments), ensure_ascii=False)
+    return {
+        "id": str(tool_call.get("id") or tool_call.get("call_id") or ""),
+        "type": "function",
+        "function": {
+            "name": str(source.get("name") or ""),
+            "arguments": str(arguments),
+        },
+    }
 
 
 def normalize_chat_response(response: Any) -> ModelResponse:
@@ -176,6 +231,6 @@ def normalize_chat_response(response: Any) -> ModelResponse:
     return ModelResponse(
         text=str(getattr(message, "content", None) or ""),
         tool_calls=tuple(tool_calls),
-        reasoning_content=getattr(message, "reasoning_content", None),
+        reasoning=getattr(message, "reasoning_content", None),
         raw=response,
     )

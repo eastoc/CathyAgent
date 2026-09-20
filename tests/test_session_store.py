@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -58,10 +59,12 @@ class SessionStoreTest(unittest.TestCase):
                     tool_calls=[
                         {
                             "id": "call_1",
-                            "type": "function",
-                            "function": {"name": "get_current_datetime", "arguments": "{}"},
+                            "name": "get_current_datetime",
+                            "arguments": {},
+                            "raw_arguments": "{}",
                         }
                     ],
+                    reasoning="需要先查询时间",
                 ),
             )
             store.append_message(
@@ -83,6 +86,7 @@ class SessionStoreTest(unittest.TestCase):
             roles = [m.role for m in loaded.messages]
             self.assertEqual(roles, ["user", "assistant", "tool", "assistant"])
             self.assertEqual(loaded.messages[1].tool_calls[0]["id"], "call_1")  # type: ignore[index]
+            self.assertEqual(loaded.messages[1].reasoning, "需要先查询时间")
             self.assertEqual(loaded.messages[2].tool_call_id, "call_1")
             self.assertEqual(loaded.messages[2].name, "get_current_datetime")
             self.assertEqual(loaded.messages[3].content, "今天是 2026-05-07。")
@@ -100,6 +104,41 @@ class SessionStoreTest(unittest.TestCase):
     def test_load_unknown_returns_none(self) -> None:
         with SessionStore(self.db_path) as store:
             self.assertIsNone(store.load("nope"))
+
+    def test_migrates_existing_messages_table_with_reasoning_column(self) -> None:
+        conn = sqlite3.connect(str(self.db_path))
+        conn.executescript(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                tool_calls_json TEXT,
+                tool_call_id TEXT,
+                name TEXT,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        conn.close()
+
+        with SessionStore(self.db_path) as store:
+            session = store.create("legacy")
+            store.append_message(
+                session.id,
+                Message(role="assistant", reasoning="保留的推理状态"),
+            )
+            loaded = store.load(session.id)
+
+        assert loaded is not None
+        self.assertEqual(loaded.messages[0].reasoning, "保留的推理状态")
 
 
 if __name__ == "__main__":

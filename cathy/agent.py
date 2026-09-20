@@ -56,11 +56,9 @@ def _model_tool_calls_to_dicts(tool_calls: tuple[ModelToolCall, ...]) -> list[di
     return [
         {
             "id": tc.id,
-            "type": "function",
-            "function": {
-                "name": tc.name,
-                "arguments": tc.raw_arguments,
-            },
+            "name": tc.name,
+            "arguments": dict(tc.arguments),
+            "raw_arguments": tc.raw_arguments,
         }
         for tc in tool_calls
     ]
@@ -137,19 +135,19 @@ class Agent:
             messages.append({"role": "system", "content": f"[hook:UserPromptSubmit] {ctx}"})
 
         trace = AgentTrace()
-        schemas = self.tools.openai_schemas() or None
-        continuation_id: str | None = None
-        continuation_messages: list[dict[str, Any]] | None = None
+        model_tools = self.tools.model_tools() or None
+        turn_state = None
+        delta_messages: list[dict[str, Any]] | None = None
 
         for step in range(self.config.max_steps):
             try:
                 response = generate_model_response(
                     self.llm,
                     messages,
-                    tools=schemas,
+                    tools=model_tools,
                     stage="main_react",
-                    continuation_id=continuation_id,
-                    continuation_messages=continuation_messages,
+                    turn_state=turn_state,
+                    delta_messages=delta_messages,
                 )
             except LLMCallError as exc:
                 content = _llm_error_message(exc)
@@ -181,8 +179,8 @@ class Agent:
                         )
                         nudge_message = {"role": "system", "content": nudge}
                         messages.append(nudge_message)
-                        continuation_id = response.continuation_id
-                        continuation_messages = [nudge_message]
+                        turn_state = response.next_turn_state
+                        delta_messages = [nudge_message]
                         trace.add("hook_blocked", {"event": STOP, "reason": reason, "step": step})
                         self._on_event("hook", {"event": STOP, "blocked": True, "reason": reason})
                         continue
@@ -200,17 +198,12 @@ class Agent:
                 role="assistant",
                 content=response.text or "",
                 tool_calls=tool_calls_dicts,
+                reasoning=response.reasoning,
             )
             self.store.append_message(session.id, assistant_msg)
             session.append(assistant_msg)
 
-            # DeepSeek thinking 模式：带 tool_calls 的 assistant 消息必须把
-            # reasoning_content 一起回灌，否则下一轮 400 invalid_request。
-            api_assistant = assistant_msg.to_openai_dict()
-            reasoning = response.reasoning_content
-            if reasoning:
-                api_assistant["reasoning_content"] = reasoning
-            messages.append(api_assistant)
+            messages.append(assistant_msg.to_model_dict())
 
             tool_result_messages: list[dict[str, Any]] = []
             for tc in response.tool_calls:
@@ -272,7 +265,7 @@ class Agent:
                         tool_msg = Message(role="tool", content=result, tool_call_id=tc.id, name=name)
                         self.store.append_message(session.id, tool_msg)
                         session.append(tool_msg)
-                        tool_message = tool_msg.to_openai_dict()
+                        tool_message = tool_msg.to_model_dict()
                         messages.append(tool_message)
                         tool_result_messages.append(tool_message)
                         continue
@@ -308,12 +301,12 @@ class Agent:
                 tool_msg = Message(role="tool", content=result, tool_call_id=tc.id, name=name)
                 self.store.append_message(session.id, tool_msg)
                 session.append(tool_msg)
-                tool_message = tool_msg.to_openai_dict()
+                tool_message = tool_msg.to_model_dict()
                 messages.append(tool_message)
                 tool_result_messages.append(tool_message)
 
-            continuation_id = response.continuation_id
-            continuation_messages = tool_result_messages
+            turn_state = response.next_turn_state
+            delta_messages = tool_result_messages
 
         msg_text = f"[已达到最大步数 {self.config.max_steps}，提前结束]"
         trace.add("max_steps", {"content": msg_text})

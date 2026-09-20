@@ -1,9 +1,8 @@
 """PluginRegistry：插件发现 / 加载 / 调度。
 
 对外暴露的接口与 Phase 0 的 ToolRegistry 鸭子兼容：
-    - openai_schemas() -> list[dict]
+    - model_tools() -> list[ModelTool]
     - call(name, args) -> str
-所以 Agent 主循环（agent.py）无需任何改动即可切换。
 """
 
 from __future__ import annotations
@@ -16,6 +15,7 @@ from typing import Any, Iterable
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 
+from ..contracts import ModelTool
 from ..logger import get_logger
 from .base import PluginError, ToolPlugin
 from .manifest import LoadedPlugin, PluginManifest, ToolSpec, parse_manifest
@@ -37,7 +37,7 @@ def build_tool_catalog(tools: Iterable[ToolDescriptor]) -> str:
     """把当前已注册工具压缩成 system prompt 用的目录字符串。
 
     设计与 skills catalog 一致：只放 name + manifest description，不放 schema 细节；
-    schema 会通过 OpenAI tool schema 单独注入。
+    参数 schema 会通过模型工具契约单独注入。
     """
     items = sorted(list(tools), key=lambda t: (t.plugin, t.name))
     if not items:
@@ -46,7 +46,7 @@ def build_tool_catalog(tools: Iterable[ToolDescriptor]) -> str:
     lines = [
         "## 工具能力概览（自动注入）",
         "",
-        "以下工具来自当前已加载插件 / 子 agent；参数与约束以 OpenAI tool schema 为准。",
+        "以下工具来自当前已加载插件 / 子 agent；参数与约束以模型工具 schema 为准。",
     ]
     current_plugin = ""
     for tool in items:
@@ -117,21 +117,18 @@ class PluginRegistry:
 
     # -------- 主循环消费的接口（鸭子兼容旧 ToolRegistry）-------- #
 
-    def openai_schemas(self) -> list[dict]:
-        schemas: list[dict] = []
-        for plugin_name, loaded in self._loaded.items():
+    def model_tools(self) -> list[ModelTool]:
+        tools: list[ModelTool] = []
+        for loaded in self._loaded.values():
             for tool in loaded.manifest.tools:
-                schemas.append(
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.input_schema,
-                        },
-                    }
+                tools.append(
+                    ModelTool(
+                        name=tool.name,
+                        description=tool.description,
+                        input_schema=tool.input_schema,
+                    )
                 )
-        return schemas
+        return tools
 
     def call(self, tool_name: str, params: dict[str, Any]) -> str:
         plugin_name = self._tool_index.get(tool_name)
@@ -280,8 +277,8 @@ class ToolView:
             return False
         return True
 
-    def openai_schemas(self) -> list[dict]:
-        return [s for s in self._registry.openai_schemas() if self._is_visible(s["function"]["name"])]
+    def model_tools(self) -> list[ModelTool]:
+        return [tool for tool in self._registry.model_tools() if self._is_visible(tool.name)]
 
     def call(self, tool_name: str, params: dict[str, Any]) -> str:
         if not self._is_visible(tool_name):

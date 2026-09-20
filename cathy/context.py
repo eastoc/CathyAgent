@@ -181,7 +181,7 @@ class ContextAssembler:
         """
         msgs: list[dict] = [{"role": "system", "content": self.system_prompt}]
         history = self._fit_to_budget(session.messages)
-        msgs.extend(m.to_openai_dict() for m in history)
+        msgs.extend(m.to_model_dict() for m in history)
         if user_input is not None and user_input != "":
             msgs.append({"role": "user", "content": user_input})
         return msgs
@@ -234,7 +234,11 @@ class ContextAssembler:
         cost = _estimate_tokens(m.content or "")
         if m.tool_calls:
             for tc in m.tool_calls:
-                fn = tc.get("function") or {}
-                cost += _estimate_tokens(str(fn.get("name", "")))
-                cost += _estimate_tokens(str(fn.get("arguments", "")))
+                function = tc.get("function") or {}
+                name = tc.get("name") or function.get("name", "")
+                arguments = tc.get("raw_arguments") or tc.get("arguments")
+                if arguments is None:
+                    arguments = function.get("arguments", "")
+                cost += _estimate_tokens(str(name))
+                cost += _estimate_tokens(str(arguments))
         return cost

@@ -56,11 +56,11 @@
       web_search.py    # 搬运 AgentTest/custom.py 已验证逻辑
       read_file.py     # 仅读，路径限制在 cwd 下
   ```
-- 工具协议：固定 OpenAI function-calling JSON。
+- 工具协议：内部使用供应商无关的模型工具契约，线协议由客户端适配器转换。
 - 主循环伪代码：
   ```text
   loop:
-    resp = llm.chat(messages, tools=registry.openai_schemas())
+    resp = llm.generate(ModelRequest(messages=messages, tools=registry.model_tools()))
     if resp.tool_calls:
         for tc in resp.tool_calls:
             messages += registry.call(tc.name, tc.args)

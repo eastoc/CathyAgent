@@ -18,6 +18,7 @@ from cathy.contracts import (  # noqa: E402
     ModelRequest,
     ModelResponse,
     ModelToolCall,
+    ModelTurnState,
 )
 from cathy.plugins.base import ToolPlugin  # noqa: E402
 from cathy.plugins.manifest import Execution, PluginManifest, ToolSpec  # noqa: E402
@@ -88,9 +89,12 @@ class AgentModelClientTest(unittest.TestCase):
                             raw_arguments='{"msg":"ping"}',
                         ),
                     ),
-                    continuation_id="resp_1",
+                    next_turn_state=ModelTurnState("resp_1"),
                 ),
-                ModelResponse(text="最终答案", continuation_id="resp_2"),
+                ModelResponse(
+                    text="最终答案",
+                    next_turn_state=ModelTurnState("resp_2"),
+                ),
             ]
         )
 
@@ -111,16 +115,18 @@ class AgentModelClientTest(unittest.TestCase):
         self.assertEqual(answer, "最终答案")
         self.assertEqual(len(model.requests), 2)
         second = model.requests[1]
-        self.assertEqual(second.continuation_id, "resp_1")
-        self.assertIsNotNone(second.continuation_messages)
-        assert second.continuation_messages is not None
-        self.assertEqual(len(second.continuation_messages), 1)
-        self.assertEqual(second.continuation_messages[0]["role"], "tool")
+        self.assertIsNotNone(second.turn_state)
+        assert second.turn_state is not None
+        self.assertEqual(second.turn_state.value, "resp_1")
+        self.assertIsNotNone(second.delta_messages)
+        assert second.delta_messages is not None
+        self.assertEqual(len(second.delta_messages), 1)
+        self.assertEqual(second.delta_messages[0]["role"], "tool")
         self.assertEqual(
-            second.continuation_messages[0]["tool_call_id"],
+            second.delta_messages[0]["tool_call_id"],
             "call_1",
         )
-        self.assertEqual(second.continuation_messages[0]["content"], "echo:ping")
+        self.assertEqual(second.delta_messages[0]["content"], "echo:ping")
 
 
 if __name__ == "__main__":

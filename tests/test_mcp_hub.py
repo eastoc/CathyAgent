@@ -171,9 +171,8 @@ class McpToolPluginIntegrationTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.registry.shutdown()  # McpToolPlugin.shutdown 会关 hub
 
-    def test_registry_exposes_mcp_tools_with_openai_schema(self) -> None:
-        schemas = self.registry.openai_schemas()
-        names = sorted(s["function"]["name"] for s in schemas)
+    def test_registry_exposes_mcp_model_tools(self) -> None:
+        names = sorted(tool.name for tool in self.registry.model_tools())
         self.assertIn("mcp__add", names)
         self.assertIn("mcp__echo", names)
 

@@ -7,7 +7,23 @@ from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 
 
 ModelMessage = Mapping[str, Any]
-ToolSchema = Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class ModelTool:
+    """供应商无关的函数工具定义。"""
+
+    name: str
+    description: str
+    input_schema: Mapping[str, Any]
+    strict: bool | None = None
+
+
+@dataclass(frozen=True)
+class ModelTurnState:
+    """由模型适配器产生、主循环只负责回传的不透明轮次状态。"""
+
+    value: Any = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -19,11 +35,11 @@ class ModelRequest:
     """
 
     messages: Sequence[ModelMessage]
-    tools: Sequence[ToolSchema] | None = None
+    tools: Sequence[ModelTool] | None = None
     tool_choice: str | None = "auto"
     stage: str = "model.generate"
-    continuation_id: str | None = None
-    continuation_messages: Sequence[ModelMessage] | None = None
+    turn_state: ModelTurnState | None = None
+    delta_messages: Sequence[ModelMessage] | None = None
 
 
 @dataclass(frozen=True)
@@ -42,8 +58,8 @@ class ModelResponse:
 
     text: str = ""
     tool_calls: tuple[ModelToolCall, ...] = ()
-    reasoning_content: str | None = None
-    continuation_id: str | None = None
+    reasoning: str | None = None
+    next_turn_state: ModelTurnState | None = None
     raw: Any = field(default=None, repr=False, compare=False)
 
 

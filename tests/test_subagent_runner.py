@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from cathy.contracts import ModelRequest, ModelResponse, ModelToolCall  # noqa: E402
 from cathy.plugins.base import ToolPlugin  # noqa: E402
 from cathy.plugins.manifest import Execution, PluginManifest, ToolSpec  # noqa: E402
 from cathy.plugins.registry import PluginRegistry, ToolView  # noqa: E402
@@ -56,28 +57,32 @@ def _build_view() -> ToolView:
     return ToolView(reg)
 
 
-def _make_tool_call(call_id: str, name: str, arguments: str) -> SimpleNamespace:
-    return SimpleNamespace(
+def _make_tool_call(call_id: str, name: str, arguments: str) -> ModelToolCall:
+    return ModelToolCall(
         id=call_id,
-        type="function",
-        function=SimpleNamespace(name=name, arguments=arguments),
+        name=name,
+        arguments=json.loads(arguments),
+        raw_arguments=arguments,
     )
 
 
-def _make_response(*, content: str = "", tool_calls: list[Any] | None = None) -> SimpleNamespace:
-    msg = SimpleNamespace(content=content, tool_calls=tool_calls or None)
-    return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+def _make_response(
+    *, content: str = "", tool_calls: list[ModelToolCall] | None = None
+) -> ModelResponse:
+    return ModelResponse(text=content, tool_calls=tuple(tool_calls or ()))
 
 
 class _ScriptedLLM:
-    """按 chat 调用顺序返回预设 response。"""
+    """按统一模型协议调用顺序返回预设 response。"""
 
-    def __init__(self, scripted: list[SimpleNamespace]) -> None:
+    model = "fake"
+
+    def __init__(self, scripted: list[ModelResponse]) -> None:
         self._scripted = list(scripted)
-        self.calls: list[dict[str, Any]] = []
+        self.calls: list[ModelRequest] = []
 
-    def chat(self, messages, *, tools=None, tool_choice="auto"):  # noqa: D401
-        self.calls.append({"messages": list(messages), "tools": tools})
+    def generate(self, request: ModelRequest) -> ModelResponse:
+        self.calls.append(request)
         if not self._scripted:
             raise AssertionError("LLM 调用次数超出脚本预设")
         return self._scripted.pop(0)
@@ -120,7 +125,7 @@ class SubagentRunnerTest(unittest.TestCase):
         self.assertEqual(types[-1], "final")
 
         # 第二轮调用应当看到 tool 消息已被 append
-        second_messages = llm.calls[1]["messages"]
+        second_messages = llm.calls[1].messages
         roles = [m["role"] for m in second_messages]
         self.assertEqual(roles[:2], ["system", "user"])
         self.assertEqual(roles[-2], "assistant")

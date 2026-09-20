@@ -252,7 +252,7 @@ class PlannerExecutorTest(unittest.TestCase):
 
 
 class PlannerExecutorAsToolTest(unittest.TestCase):
-    """通过 SubagentToolPlugin 注册到 PluginRegistry，验证 OpenAI schema 正确。"""
+    """通过 SubagentToolPlugin 注册到 PluginRegistry，验证模型工具定义。"""
 
     def test_registered_tool_schema(self) -> None:
         from cathy.subagent import SubagentToolPlugin, build_subagent_tool_manifest
@@ -264,8 +264,7 @@ class PlannerExecutorAsToolTest(unittest.TestCase):
             build_subagent_tool_manifest(pe),
             SubagentToolPlugin(pe),
         )
-        schemas = registry.openai_schemas()
-        names = [s["function"]["name"] for s in schemas]
+        names = [tool.name for tool in registry.model_tools()]
         self.assertEqual(names, ["planner_executor"])
 
         # 缺 goal 应被 schema 拦截

@@ -38,7 +38,7 @@ def build_subagent_tool_manifest(subagent: Subagent) -> PluginManifest:
 
 
 class SubagentToolPlugin(ToolPlugin):
-    """ToolPlugin 适配器：把 Subagent.run() 暴露成 OpenAI function tool。
+    """ToolPlugin 适配器：把 Subagent.run() 暴露成模型工具。
 
     可选注入 HookManager，子 agent 跑完会触发 SubagentStop。
     """
