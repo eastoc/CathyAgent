@@ -11,7 +11,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from cathy.model_clients import OpenAICompatibleChatClient, build_model_client  # noqa: E402
+from cathy.model_clients import (  # noqa: E402
+    OpenAICompatibleChatClient,
+    OpenAIResponsesClient,
+    build_model_client,
+)
 
 
 class ModelClientFactoryTest(unittest.TestCase):
@@ -46,6 +50,26 @@ class ModelClientFactoryTest(unittest.TestCase):
             }
         )
         self.assertIsInstance(client, OpenAICompatibleChatClient)
+
+    @patch("cathy.model_clients.openai_responses.OpenAI")
+    def test_builds_astra_responses_client(self, _openai_cls) -> None:
+        client = build_model_client(
+            {
+                "type": "openai_responses",
+                "api_key": "openai-key",
+                "api_base": "https://api.openai.com/v1",
+                "model": "gpt-6-astra",
+                "reasoning_effort": "high",
+                "max_output_tokens": 16384,
+                # 共享配置中的 Chat 参数必须被 Responses 分支忽略。
+                "temperature": 0.7,
+                "max_tokens": 128000,
+            }
+        )
+
+        self.assertIsInstance(client, OpenAIResponsesClient)
+        self.assertEqual(client.reasoning_effort, "high")
+        self.assertEqual(client.max_output_tokens, 16384)
 
     def test_rejects_unknown_client_type(self) -> None:
         with self.assertRaisesRegex(ValueError, "暂不支持"):

@@ -22,6 +22,8 @@ class ModelRequest:
     tools: Sequence[ToolSchema] | None = None
     tool_choice: str | None = "auto"
     stage: str = "model.generate"
+    continuation_id: str | None = None
+    continuation_messages: Sequence[ModelMessage] | None = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,7 @@ class ModelResponse:
     text: str = ""
     tool_calls: tuple[ModelToolCall, ...] = ()
     reasoning_content: str | None = None
+    continuation_id: str | None = None
     raw: Any = field(default=None, repr=False, compare=False)
 
 

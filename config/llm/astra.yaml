@@ -1,0 +1,8 @@
+type: openai_responses
+api_key: ${OPENAI_API_KEY}
+api_base: https://api.openai.com/v1
+model: gpt-6-astra
+reasoning_effort: low
+max_output_tokens: 8192
+store: true
+parallel_tool_calls: true

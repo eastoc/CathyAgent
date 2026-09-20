@@ -26,6 +26,7 @@ from typing import Any, TypedDict
 from langgraph.graph import END, StateGraph
 
 from cathy.llm_errors import AgentFailure, LLMCallError
+from cathy.model_clients import generate_model_response
 from cathy.subagent import Subagent, SubagentResult
 from cathy.subagent.runner import SubagentRunner
 
@@ -136,13 +137,15 @@ def _format_past_steps(past_steps: list[dict]) -> str:
 
 def _llm_text(llm: Any, system: str, user: str) -> str:
     """对 LLMClient 做一次纯文本对话（无工具）。"""
-    response = llm.chat(
+    response = generate_model_response(
+        llm,
         [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
-        ]
+        ],
+        stage="planner_executor",
     )
-    return (response.choices[0].message.content or "").strip()
+    return (response.text or "").strip()
 
 
 # ---------- Subagent 实现 ----------

@@ -10,10 +10,11 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, Protocol
 
+from ..contracts import ModelClient, ModelToolCall
 from ..llm_errors import LLMCallError
+from ..model_clients import generate_model_response
 from .base import SubagentResult
 
 
@@ -22,24 +23,14 @@ class _ToolsLike(Protocol):
     def call(self, tool_name: str, params: dict[str, Any]) -> str: ...
 
 
-class _LLMLike(Protocol):
-    def chat(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        tools: list[dict] | None = None,
-        tool_choice: str | None = "auto",
-    ) -> Any: ...
-
-
-def _tool_calls_to_dicts(tool_calls: Any) -> list[dict]:
+def _tool_calls_to_dicts(tool_calls: tuple[ModelToolCall, ...]) -> list[dict]:
     return [
         {
             "id": tc.id,
             "type": "function",
             "function": {
-                "name": tc.function.name,
-                "arguments": tc.function.arguments,
+                "name": tc.name,
+                "arguments": tc.raw_arguments,
             },
         }
         for tc in tool_calls
@@ -57,7 +48,7 @@ class SubagentRunner:
     def __init__(
         self,
         *,
-        llm: _LLMLike,
+        llm: ModelClient,
         tools: _ToolsLike,
         system_prompt: str,
         max_steps: int = 8,
@@ -74,14 +65,18 @@ class SubagentRunner:
         ]
         result = SubagentResult(final_answer="")
         schemas = self.tools.openai_schemas() or None
+        continuation_id: str | None = None
+        continuation_messages: list[dict[str, Any]] | None = None
 
         for step in range(self.max_steps):
             try:
-                response = _chat_with_optional_stage(
+                response = generate_model_response(
                     self.llm,
                     messages,
                     tools=schemas,
                     stage="subagent_runner",
+                    continuation_id=continuation_id,
+                    continuation_messages=continuation_messages,
                 )
             except LLMCallError as exc:
                 result.final_answer = (
@@ -93,23 +88,21 @@ class SubagentRunner:
                 result.failure = exc.failure
                 result.add("llm_error", {"step": step, "failure": exc.failure.to_dict()})
                 return result
-            msg = response.choices[0].message
-
-            if not msg.tool_calls:
-                content = (msg.content or "").strip()
+            if not response.tool_calls:
+                content = (response.text or "").strip()
                 result.final_answer = content
                 result.add("final", {"step": step, "content": content})
                 return result
 
-            tool_calls_dicts = _tool_calls_to_dicts(msg.tool_calls)
+            tool_calls_dicts = _tool_calls_to_dicts(response.tool_calls)
             assistant_dict: dict[str, Any] = {
                 "role": "assistant",
-                "content": msg.content or "",
+                "content": response.text or "",
                 "tool_calls": tool_calls_dicts,
             }
             # DeepSeek thinking 模式：reasoning_content 必须随 assistant.tool_calls
             # 一起回灌到下一轮 API，否则服务端 400。
-            reasoning = getattr(msg, "reasoning_content", None)
+            reasoning = response.reasoning_content
             if reasoning:
                 assistant_dict["reasoning_content"] = reasoning
             messages.append(assistant_dict)
@@ -118,12 +111,10 @@ class SubagentRunner:
                 {"step": step, "tool_calls": tool_calls_dicts},
             )
 
-            for tc in msg.tool_calls:
-                name = tc.function.name
-                try:
-                    args = json.loads(tc.function.arguments or "{}")
-                except json.JSONDecodeError:
-                    args = {}
+            tool_result_messages: list[dict[str, Any]] = []
+            for tc in response.tool_calls:
+                name = tc.name
+                args = dict(tc.arguments)
                 result.add("tool_call", {"step": step, "name": name, "args": args})
 
                 output = self.tools.call(name, args)
@@ -132,32 +123,20 @@ class SubagentRunner:
                     "tool_result",
                     {"step": step, "name": name, "result": output},
                 )
-                messages.append(
-                    {
-                        "role": "tool",
-                        "content": output,
-                        "tool_call_id": tc.id,
-                        "name": name,
-                    }
-                )
+                tool_message = {
+                    "role": "tool",
+                    "content": output,
+                    "tool_call_id": tc.id,
+                    "name": name,
+                }
+                messages.append(tool_message)
+                tool_result_messages.append(tool_message)
+
+            continuation_id = response.continuation_id
+            continuation_messages = tool_result_messages
 
         result.final_answer = f"[subagent] 已达到最大步数 {self.max_steps}，提前结束。"
         result.finished = False
         result.status = "incomplete"
         result.add("max_steps", {"content": result.final_answer})
         return result
-
-
-def _chat_with_optional_stage(
-    llm: Any,
-    messages: list[dict[str, Any]],
-    *,
-    tools: list[dict] | None,
-    stage: str,
-) -> Any:
-    try:
-        return llm.chat(messages, tools=tools, stage=stage)
-    except TypeError as exc:
-        if "stage" not in str(exc):
-            raise
-        return llm.chat(messages, tools=tools)

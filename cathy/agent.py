@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .contracts import ModelClient, ModelToolCall
 from .context import ContextAssembler
 from .hooks import (
     HookEvent,
@@ -29,8 +30,8 @@ from .hooks import (
     STOP,
     USER_PROMPT_SUBMIT,
 )
-from .llm import LLMClient
 from .llm_errors import LLMCallError
+from .model_clients import generate_model_response
 from .plugins import PluginRegistry
 from .session.models import Message, Session
 from .session.store import SessionStore
@@ -51,14 +52,14 @@ class AgentTrace:
         self.steps.append({"type": step_type, **payload})
 
 
-def _openai_tool_calls_to_dicts(tool_calls: Any) -> list[dict]:
+def _model_tool_calls_to_dicts(tool_calls: tuple[ModelToolCall, ...]) -> list[dict]:
     return [
         {
             "id": tc.id,
             "type": "function",
             "function": {
-                "name": tc.function.name,
-                "arguments": tc.function.arguments,
+                "name": tc.name,
+                "arguments": tc.raw_arguments,
             },
         }
         for tc in tool_calls
@@ -69,7 +70,7 @@ class Agent:
     def __init__(
         self,
         *,
-        llm: LLMClient,
+        llm: ModelClient,
         tools: PluginRegistry,
         assembler: ContextAssembler,
         store: SessionStore,
@@ -137,14 +138,18 @@ class Agent:
 
         trace = AgentTrace()
         schemas = self.tools.openai_schemas() or None
+        continuation_id: str | None = None
+        continuation_messages: list[dict[str, Any]] | None = None
 
         for step in range(self.config.max_steps):
             try:
-                response = _chat_with_optional_stage(
+                response = generate_model_response(
                     self.llm,
                     messages,
                     tools=schemas,
                     stage="main_react",
+                    continuation_id=continuation_id,
+                    continuation_messages=continuation_messages,
                 )
             except LLMCallError as exc:
                 content = _llm_error_message(exc)
@@ -154,11 +159,9 @@ class Agent:
                 trace.add("llm_error", {"step": step, "failure": exc.failure.to_dict()})
                 self._on_event("llm_error", {"failure": exc.failure.to_dict()})
                 return content, trace
-            msg = response.choices[0].message
-
             # ---- 终止分支：无 tool_calls，准备返回 ----
-            if not msg.tool_calls:
-                content = (msg.content or "").strip()
+            if not response.tool_calls:
+                content = (response.text or "").strip()
 
                 # === Hook 4/4: Stop ===
                 stop_decision = self._dispatch(
@@ -176,7 +179,10 @@ class Agent:
                             f"[hook:Stop] 你刚才的回答被拦截：{reason}。"
                             "请基于现有上下文重新作答。"
                         )
-                        messages.append({"role": "system", "content": nudge})
+                        nudge_message = {"role": "system", "content": nudge}
+                        messages.append(nudge_message)
+                        continuation_id = response.continuation_id
+                        continuation_messages = [nudge_message]
                         trace.add("hook_blocked", {"event": STOP, "reason": reason, "step": step})
                         self._on_event("hook", {"event": STOP, "blocked": True, "reason": reason})
                         continue
@@ -189,10 +195,10 @@ class Agent:
                 return content, trace
 
             # ---- tool_calls 分支 ----
-            tool_calls_dicts = _openai_tool_calls_to_dicts(msg.tool_calls)
+            tool_calls_dicts = _model_tool_calls_to_dicts(response.tool_calls)
             assistant_msg = Message(
                 role="assistant",
-                content=msg.content or "",
+                content=response.text or "",
                 tool_calls=tool_calls_dicts,
             )
             self.store.append_message(session.id, assistant_msg)
@@ -201,17 +207,15 @@ class Agent:
             # DeepSeek thinking 模式：带 tool_calls 的 assistant 消息必须把
             # reasoning_content 一起回灌，否则下一轮 400 invalid_request。
             api_assistant = assistant_msg.to_openai_dict()
-            reasoning = getattr(msg, "reasoning_content", None)
+            reasoning = response.reasoning_content
             if reasoning:
                 api_assistant["reasoning_content"] = reasoning
             messages.append(api_assistant)
 
-            for tc in msg.tool_calls:
-                name = tc.function.name
-                try:
-                    args = json.loads(tc.function.arguments or "{}")
-                except json.JSONDecodeError:
-                    args = {}
+            tool_result_messages: list[dict[str, Any]] = []
+            for tc in response.tool_calls:
+                name = tc.name
+                args = dict(tc.arguments)
 
                 # === Hook 2/4: PreToolUse ===
                 desc = None
@@ -268,7 +272,9 @@ class Agent:
                         tool_msg = Message(role="tool", content=result, tool_call_id=tc.id, name=name)
                         self.store.append_message(session.id, tool_msg)
                         session.append(tool_msg)
-                        messages.append(tool_msg.to_openai_dict())
+                        tool_message = tool_msg.to_openai_dict()
+                        messages.append(tool_message)
+                        tool_result_messages.append(tool_message)
                         continue
 
                 self._on_event("tool_call", {"name": name, "args": args})
@@ -302,7 +308,12 @@ class Agent:
                 tool_msg = Message(role="tool", content=result, tool_call_id=tc.id, name=name)
                 self.store.append_message(session.id, tool_msg)
                 session.append(tool_msg)
-                messages.append(tool_msg.to_openai_dict())
+                tool_message = tool_msg.to_openai_dict()
+                messages.append(tool_message)
+                tool_result_messages.append(tool_message)
+
+            continuation_id = response.continuation_id
+            continuation_messages = tool_result_messages
 
         msg_text = f"[已达到最大步数 {self.config.max_steps}，提前结束]"
         trace.add("max_steps", {"content": msg_text})
@@ -329,18 +340,3 @@ def _tool_error_payload(tool_name: str, exc: Exception) -> str:
         },
         ensure_ascii=False,
     )
-
-
-def _chat_with_optional_stage(
-    llm: Any,
-    messages: list[dict[str, Any]],
-    *,
-    tools: list[dict] | None,
-    stage: str,
-) -> Any:
-    try:
-        return llm.chat(messages, tools=tools, stage=stage)
-    except TypeError as exc:
-        if "stage" not in str(exc):
-            raise
-        return llm.chat(messages, tools=tools)

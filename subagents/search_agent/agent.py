@@ -10,6 +10,7 @@ from typing import Any, TypedDict
 from langgraph.graph import END, StateGraph
 
 from cathy.llm_errors import AgentFailure, LLMCallError
+from cathy.model_clients import generate_model_response
 from cathy.subagent import Subagent, SubagentResult
 
 
@@ -31,13 +32,15 @@ def _trace(state: SearchState, step_type: str, payload: dict[str, Any]) -> None:
 
 
 def _llm_text(llm: Any, system: str, user: str) -> str:
-    response = llm.chat(
+    response = generate_model_response(
+        llm,
         [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
-        ]
+        ],
+        stage="search_agent",
     )
-    return (response.choices[0].message.content or "").strip()
+    return (response.text or "").strip()
 
 
 def _parse_json_object(text: str) -> dict[str, Any] | None:
