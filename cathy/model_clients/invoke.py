@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from ..contracts import ModelRequest, ModelResponse, ModelTool, ModelTurnState
+from ..contracts import (
+    AttachmentResolver,
+    ModelRequest,
+    ModelResponse,
+    ModelTool,
+    ModelTurnState,
+)
 from .openai_compatible_chat import (
     convert_chat_messages,
     convert_chat_tool,
@@ -21,6 +27,7 @@ def generate_model_response(
     stage: str,
     turn_state: ModelTurnState | None = None,
     delta_messages: Sequence[dict[str, Any]] | None = None,
+    attachment_resolver: AttachmentResolver | None = None,
 ) -> ModelResponse:
     """调用统一 ``ModelClient``；旧 ``chat`` 对象只用于迁移期兼容。"""
     generate = getattr(llm, "generate", None)
@@ -33,6 +40,7 @@ def generate_model_response(
                 stage=stage,
                 turn_state=turn_state,
                 delta_messages=delta_messages,
+                attachment_resolver=attachment_resolver,
             )
         )
 
@@ -41,7 +49,7 @@ def generate_model_response(
         raise TypeError("模型客户端必须实现 generate(ModelRequest)")
     try:
         raw_response = chat(
-            convert_chat_messages(messages),
+            convert_chat_messages(messages, attachment_resolver=attachment_resolver),
             tools=[convert_chat_tool(tool) for tool in tools] if tools else None,
             tool_choice=tool_choice,
             stage=stage,
@@ -50,7 +58,7 @@ def generate_model_response(
         if "stage" not in str(exc):
             raise
         raw_response = chat(
-            convert_chat_messages(messages),
+            convert_chat_messages(messages, attachment_resolver=attachment_resolver),
             tools=[convert_chat_tool(tool) for tool in tools] if tools else None,
             tool_choice=tool_choice,
         )

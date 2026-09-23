@@ -16,6 +16,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 from config.config import get_llm, get_llm_provider, load_config  # noqa: E402
 
 from .agent import Agent, AgentConfig  # noqa: E402
+from .artifacts import LocalArtifactStore  # noqa: E402
 from .context import ContextAssembler  # noqa: E402
 from .hooks import HookEvent, HookManager, SESSION_START  # noqa: E402
 from .logger import configure_logging, get_logger  # noqa: E402
@@ -96,6 +97,15 @@ def _resolve_db_path(cfg: dict) -> Path:
     if not p.is_absolute():
         p = _PROJECT_ROOT / p
     return p
+
+
+def _resolve_artifacts_path(cfg: dict) -> Path:
+    session_cfg = cfg.get("SESSION") or {}
+    raw = session_cfg.get("artifacts_path") or "data/artifacts"
+    path = Path(raw)
+    if not path.is_absolute():
+        path = _PROJECT_ROOT / path
+    return path
 
 
 def _hook_log(entry: dict) -> None:
@@ -264,6 +274,7 @@ def build_runtime(cfg: dict | None = None) -> tuple[Agent, SessionStore, HookMan
     )
 
     store = SessionStore(_resolve_db_path(cfg))
+    artifact_store = LocalArtifactStore(_resolve_artifacts_path(cfg))
 
     agent = Agent(
         llm=llm,
@@ -274,6 +285,7 @@ def build_runtime(cfg: dict | None = None) -> tuple[Agent, SessionStore, HookMan
         on_event=_on_event,
         hooks=hooks,
         permission_cfg=dict(cfg.get("PERMISSION") or {}),
+        attachment_resolver=artifact_store,
     )
     return agent, store, hooks
 

@@ -25,6 +25,7 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
 
+from cathy.contracts.content import text_model_content
 from cathy.llm_errors import AgentFailure, LLMCallError
 from cathy.model_clients import generate_model_response
 from cathy.subagent import Subagent, SubagentResult
@@ -140,8 +141,8 @@ def _llm_text(llm: Any, system: str, user: str) -> str:
     response = generate_model_response(
         llm,
         [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            {"role": "system", "content": text_model_content(system)},
+            {"role": "user", "content": text_model_content(user)},
         ],
         stage="planner_executor",
     )

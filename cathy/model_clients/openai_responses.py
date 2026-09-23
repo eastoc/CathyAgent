@@ -9,11 +9,17 @@ from typing import Any, Mapping, Sequence
 from openai import OpenAI
 
 from ..contracts import (
+    AttachmentResolver,
     ModelRequest,
     ModelResponse,
     ModelTool,
     ModelToolCall,
     ModelTurnState,
+)
+from ..contracts.content import (
+    attachment_from_dict,
+    coerce_content_blocks,
+    content_blocks_to_text,
 )
 from ..llm_errors import LLMCallError, classify_llm_exception
 
@@ -68,7 +74,10 @@ class OpenAIResponsesClient:
             input_messages = request.delta_messages
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "input": convert_response_input(input_messages),
+            "input": convert_response_input(
+                input_messages,
+                attachment_resolver=request.attachment_resolver,
+            ),
             "reasoning": {"effort": self.reasoning_effort},
             "store": self.store,
             "parallel_tool_calls": self.parallel_tool_calls,
@@ -134,7 +143,11 @@ def convert_tool_choice(tool_choice: Any) -> Any:
     return dict(tool_choice)
 
 
-def convert_response_input(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def convert_response_input(
+    messages: Sequence[Mapping[str, Any]],
+    *,
+    attachment_resolver: AttachmentResolver | None = None,
+) -> list[dict[str, Any]]:
     """把现有 role/content 历史转换成 Responses input items。"""
     items: list[dict[str, Any]] = []
     for message in messages:
@@ -152,7 +165,10 @@ def convert_response_input(messages: Sequence[Mapping[str, Any]]) -> list[dict[s
             )
             continue
 
-        content = _convert_message_content(message.get("content"))
+        content = _convert_message_content(
+            message.get("content"),
+            attachment_resolver=attachment_resolver,
+        )
         if content not in (None, "", []):
             items.append({"role": role, "content": content})
 
@@ -164,7 +180,11 @@ def convert_response_input(messages: Sequence[Mapping[str, Any]]) -> list[dict[s
     return items
 
 
-def _convert_message_content(content: Any) -> Any:
+def _convert_message_content(
+    content: Any,
+    *,
+    attachment_resolver: AttachmentResolver | None = None,
+) -> Any:
     if not isinstance(content, list):
         return content
 
@@ -175,6 +195,21 @@ def _convert_message_content(content: Any) -> Any:
         part_type = part.get("type")
         if part_type in {"text", "input_text"}:
             parts.append({"type": "input_text", "text": str(part.get("text") or "")})
+        elif part_type == "image":
+            attachment = part.get("attachment")
+            if not isinstance(attachment, Mapping):
+                raise ValueError("image content block 缺少 attachment")
+            image_url = _resolve_attachment_data_url(
+                attachment,
+                attachment_resolver=attachment_resolver,
+            )
+            converted_image: dict[str, Any] = {
+                "type": "input_image",
+                "image_url": image_url,
+            }
+            if part.get("detail"):
+                converted_image["detail"] = str(part["detail"])
+            parts.append(converted_image)
         elif part_type in {"image_url", "input_image"}:
             image = part.get("image_url")
             image_url = image.get("url") if isinstance(image, Mapping) else image
@@ -187,8 +222,29 @@ def _convert_message_content(content: Any) -> Any:
                 if detail:
                     converted["detail"] = str(detail)
                 parts.append(converted)
+        elif part_type == "json":
+            body = json.dumps(
+                part.get("value"),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            label = str(part.get("label") or "").strip()
+            parts.append(
+                {
+                    "type": "input_text",
+                    "text": f"{label}: {body}" if label else body,
+                }
+            )
         elif part_type in {"file", "input_file"}:
             converted_file = {"type": "input_file"}
+            attachment = part.get("attachment")
+            if isinstance(attachment, Mapping):
+                converted_file["file_data"] = _resolve_attachment_data_url(
+                    attachment,
+                    attachment_resolver=attachment_resolver,
+                )
+                if attachment.get("filename"):
+                    converted_file["filename"] = str(attachment["filename"])
             for key in ("file_id", "file_data", "filename"):
                 if part.get(key) is not None:
                     converted_file[key] = part[key]
@@ -196,6 +252,16 @@ def _convert_message_content(content: Any) -> Any:
         else:
             parts.append(dict(part))
     return parts
+
+
+def _resolve_attachment_data_url(
+    value: Mapping[str, Any],
+    *,
+    attachment_resolver: AttachmentResolver | None,
+) -> str:
+    if attachment_resolver is None:
+        raise ValueError("多模态请求包含附件，但未配置 attachment_resolver")
+    return attachment_resolver.data_url(attachment_from_dict(value))
 
 
 def _convert_historical_tool_call(tool_call: Any) -> dict[str, Any] | None:
@@ -220,6 +286,12 @@ def _convert_historical_tool_call(tool_call: Any) -> dict[str, Any] | None:
 def _stringify_tool_output(output: Any) -> str:
     if isinstance(output, str):
         return output
+    if isinstance(output, list) and all(
+        isinstance(part, Mapping)
+        and part.get("type") in {"text", "image", "file", "json"}
+        for part in output
+    ):
+        return content_blocks_to_text(coerce_content_blocks(output))
     return json.dumps(output, ensure_ascii=False)
 
 

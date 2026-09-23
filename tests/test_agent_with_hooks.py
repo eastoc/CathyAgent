@@ -241,7 +241,7 @@ class AgentHooksIntegrationTests(unittest.TestCase):
             self.assertTrue(llm.saw_messages)
             user_msgs = [m for m in llm.saw_messages[0] if m["role"] == "user"]
             self.assertTrue(user_msgs)
-            self.assertEqual(user_msgs[-1]["content"], "改写后的输入")
+            self.assertEqual(user_msgs[-1]["content"][0]["text"], "改写后的输入")
             store.close()
 
     def test_pre_tool_use_block_prevents_actual_call_and_self_corrects(self) -> None:
@@ -280,8 +280,9 @@ class AgentHooksIntegrationTests(unittest.TestCase):
             self.assertEqual(len(llm.saw_messages), 2)
             second_round_tool_msgs = [m for m in llm.saw_messages[1] if m.get("role") == "tool"]
             self.assertTrue(second_round_tool_msgs)
-            self.assertIn("[BLOCKED]", second_round_tool_msgs[-1]["content"])
-            self.assertIn("echo 暂停服务", second_round_tool_msgs[-1]["content"])
+            blocked_text = second_round_tool_msgs[-1]["content"][0]["text"]
+            self.assertIn("[BLOCKED]", blocked_text)
+            self.assertIn("echo 暂停服务", blocked_text)
             # trace 里也有 hook_blocked 记录
             self.assertTrue(any(s.get("type") == "hook_blocked" for s in trace.steps))
             store.close()
@@ -315,7 +316,11 @@ class AgentHooksIntegrationTests(unittest.TestCase):
             self.assertEqual(reply, "完成")
             self.assertEqual(len(spy.calls), 1)
             second_round = llm.saw_messages[1]
-            tool_contents = [m["content"] for m in second_round if m.get("role") == "tool"]
+            tool_contents = [
+                m["content"][0]["text"]
+                for m in second_round
+                if m.get("role") == "tool"
+            ]
             self.assertTrue(tool_contents)
             self.assertIn("echo:hi", tool_contents[-1])
             self.assertIn("hook:PostToolUse", tool_contents[-1])
@@ -358,7 +363,7 @@ class AgentHooksIntegrationTests(unittest.TestCase):
             # session 里只持久化了最终 assistant，没把第一稿写进去
             session2 = store.load(session.id)
             assert session2 is not None
-            assistant_contents = [m.content for m in session2.messages if m.role == "assistant"]
+            assistant_contents = [m.text for m in session2.messages if m.role == "assistant"]
             self.assertEqual(assistant_contents, ["第二稿(终稿)"])
             store.close()
 

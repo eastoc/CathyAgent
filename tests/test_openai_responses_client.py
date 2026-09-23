@@ -12,7 +12,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from cathy.contracts import ModelRequest, ModelTool, ModelTurnState  # noqa: E402
+from cathy.artifacts import LocalArtifactStore  # noqa: E402
+from cathy.contracts import (  # noqa: E402
+    AttachmentRef,
+    ImageBlock,
+    ModelRequest,
+    ModelTool,
+    ModelTurnState,
+    TextBlock,
+)
+from cathy.contracts.content import serialize_content_blocks  # noqa: E402
 from cathy.llm_errors import LLMCallError  # noqa: E402
 from cathy.model_clients.openai_responses import (  # noqa: E402
     OpenAIResponsesClient,
@@ -184,6 +193,46 @@ class OpenAIResponsesClientTest(unittest.TestCase):
         self.assertEqual(items[0]["content"][0]["type"], "input_text")
         self.assertEqual(items[0]["content"][1]["type"], "input_image")
         self.assertEqual(items[0]["content"][1]["detail"], "high")
+
+    def test_converts_neutral_image_attachment(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            store = LocalArtifactStore(td)
+            ref = store.put_bytes(b"image", mime_type="image/png")
+            items = convert_response_input(
+                [
+                    {
+                        "role": "user",
+                        "content": serialize_content_blocks(
+                            (TextBlock("观察"), ImageBlock(ref, detail="low"))
+                        ),
+                    }
+                ],
+                attachment_resolver=store,
+            )
+
+        image_part = items[0]["content"][1]
+        self.assertEqual(image_part["type"], "input_image")
+        self.assertTrue(image_part["image_url"].startswith("data:image/png;base64,"))
+        self.assertEqual(image_part["detail"], "low")
+
+    def test_neutral_image_requires_attachment_resolver(self) -> None:
+        ref = AttachmentRef(
+            artifact_id="sha256:" + "c" * 64,
+            mime_type="image/png",
+            sha256="c" * 64,
+            size_bytes=1,
+        )
+        with self.assertRaisesRegex(ValueError, "attachment_resolver"):
+            convert_response_input(
+                [
+                    {
+                        "role": "user",
+                        "content": serialize_content_blocks((ImageBlock(ref),)),
+                    }
+                ]
+            )
 
     def test_rejects_invalid_reasoning_effort(self) -> None:
         with self.assertRaisesRegex(ValueError, "reasoning_effort"):

@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from cathy.context import ContextAssembler, build_system_prompt  # noqa: E402
+from cathy.contracts.content import text_content, text_model_content  # noqa: E402
 from cathy.session.models import Message, Session  # noqa: E402
 
 
@@ -31,34 +32,37 @@ class ContextAssemblerTest(unittest.TestCase):
         out = asm.assemble(_mk_session([]), user_input="hi")
         self.assertGreaterEqual(len(out), 2)
         self.assertEqual(out[0]["role"], "system")
-        self.assertIn("Cathy", out[0]["content"])
-        self.assertEqual(out[-1], {"role": "user", "content": "hi"})
+        self.assertIn("Cathy", out[0]["content"][0]["text"])
+        self.assertEqual(
+            out[-1],
+            {"role": "user", "content": text_model_content("hi")},
+        )
 
     def test_history_passthrough_when_within_budget(self) -> None:
         msgs = [
-            Message(role="user", content="q1"),
-            Message(role="assistant", content="a1"),
-            Message(role="user", content="q2"),
-            Message(role="assistant", content="a2"),
+            Message(role="user", content=text_content("q1")),
+            Message(role="assistant", content=text_content("a1")),
+            Message(role="user", content=text_content("q2")),
+            Message(role="assistant", content=text_content("a2")),
         ]
         asm = ContextAssembler(token_budget=8000)
         out = asm.assemble(_mk_session(msgs), user_input="q3")
         self.assertEqual(out[0]["role"], "system")
         roles = [m["role"] for m in out[1:]]
         self.assertEqual(roles, ["user", "assistant", "user", "assistant", "user"])
-        self.assertEqual(out[-1]["content"], "q3")
+        self.assertEqual(out[-1]["content"], text_model_content("q3"))
 
     def test_history_truncates_at_user_boundary_when_over_budget(self) -> None:
         # 构造 4 段历史，每段 user+assistant，每段约 1200 字符 → ~300 token；
         # 预算 600 token 时仅能保留最后一段 user+assistant
         long = "字" * 1200
         msgs = [
-            Message(role="user", content=f"q1 {long}"),
-            Message(role="assistant", content=f"a1 {long}"),
-            Message(role="user", content=f"q2 {long}"),
-            Message(role="assistant", content=f"a2 {long}"),
-            Message(role="user", content=f"q3 {long}"),
-            Message(role="assistant", content=f"a3 {long}"),
+            Message(role="user", content=text_content(f"q1 {long}")),
+            Message(role="assistant", content=text_content(f"a1 {long}")),
+            Message(role="user", content=text_content(f"q2 {long}")),
+            Message(role="assistant", content=text_content(f"a2 {long}")),
+            Message(role="user", content=text_content(f"q3 {long}")),
+            Message(role="assistant", content=text_content(f"a3 {long}")),
         ]
         asm = ContextAssembler(token_budget=600)
         out = asm.assemble(_mk_session(msgs))
@@ -70,8 +74,13 @@ class ContextAssemblerTest(unittest.TestCase):
 
     def test_user_input_optional(self) -> None:
         asm = ContextAssembler()
-        out = asm.assemble(_mk_session([Message(role="user", content="x")]))
-        self.assertEqual(out[-1], {"role": "user", "content": "x"})
+        out = asm.assemble(
+            _mk_session([Message(role="user", content=text_content("x"))])
+        )
+        self.assertEqual(
+            out[-1],
+            {"role": "user", "content": text_model_content("x")},
+        )
 
     def test_project_rules_injected_when_agents_md_present(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

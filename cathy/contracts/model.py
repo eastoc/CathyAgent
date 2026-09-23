@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 
+from .content import AttachmentResolver
+
 
 ModelMessage = Mapping[str, Any]
 
@@ -30,8 +32,8 @@ class ModelTurnState:
 class ModelRequest:
     """一次模型生成请求。
 
-    ``messages`` 暂时兼容现有 role/content 消息结构；后续增加图片等输入时，
-    只扩展契约和 provider adapter，不要求 Agent 依赖具体 SDK 类型。
+    ``messages`` 使用供应商无关的 role/content 结构；附件只保存稳定引用，
+    provider adapter 通过 ``attachment_resolver`` 按需读取二进制内容。
     """
 
     messages: Sequence[ModelMessage]
@@ -40,6 +42,11 @@ class ModelRequest:
     stage: str = "model.generate"
     turn_state: ModelTurnState | None = None
     delta_messages: Sequence[ModelMessage] | None = None
+    attachment_resolver: AttachmentResolver | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
 
 @dataclass(frozen=True)

@@ -14,6 +14,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from cathy.session.models import Message  # noqa: E402
 from cathy.session.store import SessionStore  # noqa: E402
+from cathy.contracts import AttachmentRef, ImageBlock, TextBlock  # noqa: E402
+from cathy.contracts.content import text_content  # noqa: E402
 
 
 class SessionStoreTest(unittest.TestCase):
@@ -38,6 +40,10 @@ class SessionStoreTest(unittest.TestCase):
             self.assertEqual(loaded.id, s.id)  # type: ignore[union-attr]
             self.assertEqual(loaded.metadata.get("label"), "demo")  # type: ignore[union-attr]
 
+    def test_message_rejects_legacy_string_content(self) -> None:
+        with self.assertRaisesRegex(TypeError, "ContentBlock"):
+            Message(role="user", content="legacy string")
+
     def test_get_or_create_with_unknown_id_creates(self) -> None:
         with SessionStore(self.db_path) as store:
             s = store.get_or_create("manual-id-1")
@@ -50,12 +56,12 @@ class SessionStoreTest(unittest.TestCase):
     def test_message_roundtrip_including_tool_calls(self) -> None:
         with SessionStore(self.db_path) as store:
             s = store.create()
-            store.append_message(s.id, Message(role="user", content="hi"))
+            store.append_message(s.id, Message(role="user", content=text_content("hi")))
             store.append_message(
                 s.id,
                 Message(
                     role="assistant",
-                    content="",
+                    content=(),
                     tool_calls=[
                         {
                             "id": "call_1",
@@ -71,12 +77,15 @@ class SessionStoreTest(unittest.TestCase):
                 s.id,
                 Message(
                     role="tool",
-                    content="ISO: 2026-05-07T17:00:00+08:00",
+                    content=text_content("ISO: 2026-05-07T17:00:00+08:00"),
                     tool_call_id="call_1",
                     name="get_current_datetime",
                 ),
             )
-            store.append_message(s.id, Message(role="assistant", content="今天是 2026-05-07。"))
+            store.append_message(
+                s.id,
+                Message(role="assistant", content=text_content("今天是 2026-05-07。")),
+            )
 
         # 重连读取，验证字段、顺序、tool_calls 完整 roundtrip
         with SessionStore(self.db_path) as store2:
@@ -89,56 +98,80 @@ class SessionStoreTest(unittest.TestCase):
             self.assertEqual(loaded.messages[1].reasoning, "需要先查询时间")
             self.assertEqual(loaded.messages[2].tool_call_id, "call_1")
             self.assertEqual(loaded.messages[2].name, "get_current_datetime")
-            self.assertEqual(loaded.messages[3].content, "今天是 2026-05-07。")
+            self.assertEqual(loaded.messages[3].text, "今天是 2026-05-07。")
 
     def test_list_sessions_orders_by_recent(self) -> None:
         with SessionStore(self.db_path) as store:
             s1 = store.create("aaa")
             s2 = store.create("bbb")
-            store.append_message(s1.id, Message(role="user", content="late update"))
+            store.append_message(
+                s1.id,
+                Message(role="user", content=text_content("late update")),
+            )
             rows = store.list_sessions()
             ids = [r["id"] for r in rows]
             self.assertEqual(ids[0], "aaa")  # s1 最近更新
             self.assertIn("bbb", ids)
 
+    def test_multimodal_message_roundtrip(self) -> None:
+        ref = AttachmentRef(
+            artifact_id="sha256:" + "a" * 64,
+            mime_type="image/png",
+            sha256="a" * 64,
+            size_bytes=42,
+            filename="front.png",
+            width=640,
+            height=480,
+        )
+        with SessionStore(self.db_path) as store:
+            session = store.create()
+            store.append_message(
+                session.id,
+                Message(
+                    role="user",
+                    content=(TextBlock("观察"), ImageBlock(ref, detail="high")),
+                    metadata={"episode_id": "episode-1", "step": 7},
+                ),
+            )
+
+        with SessionStore(self.db_path) as store:
+            loaded = store.load(session.id)
+
+        assert loaded is not None
+        self.assertEqual(loaded.messages[0].text, "观察")
+        self.assertEqual(loaded.messages[0].content[1], ImageBlock(ref, detail="high"))
+        self.assertEqual(loaded.messages[0].metadata["episode_id"], "episode-1")
+        model_content = loaded.messages[0].to_model_dict()["content"]
+        self.assertIsInstance(model_content, list)
+        self.assertEqual(model_content[1]["type"], "image")
+
     def test_load_unknown_returns_none(self) -> None:
         with SessionStore(self.db_path) as store:
             self.assertIsNone(store.load("nope"))
 
-    def test_migrates_existing_messages_table_with_reasoning_column(self) -> None:
-        conn = sqlite3.connect(str(self.db_path))
-        conn.executescript(
-            """
-            CREATE TABLE sessions (
-                id TEXT PRIMARY KEY,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                metadata_json TEXT NOT NULL DEFAULT '{}'
-            );
-            CREATE TABLE messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                tool_calls_json TEXT,
-                tool_call_id TEXT,
-                name TEXT,
-                created_at TEXT NOT NULL
-            );
-            """
-        )
-        conn.close()
-
+    def test_schema_uses_content_json_as_single_source(self) -> None:
         with SessionStore(self.db_path) as store:
-            session = store.create("legacy")
+            session = store.create("fresh")
             store.append_message(
                 session.id,
-                Message(role="assistant", reasoning="保留的推理状态"),
+                Message(
+                    role="assistant",
+                    content=text_content("唯一内容"),
+                    reasoning="保留的推理状态",
+                ),
             )
             loaded = store.load(session.id)
 
         assert loaded is not None
         self.assertEqual(loaded.messages[0].reasoning, "保留的推理状态")
+        self.assertEqual(loaded.messages[0].text, "唯一内容")
+
+        conn = sqlite3.connect(str(self.db_path))
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+        conn.close()
+        self.assertIn("content_json", columns)
+        self.assertIn("metadata_json", columns)
+        self.assertNotIn("content", columns)
 
 
 if __name__ == "__main__":

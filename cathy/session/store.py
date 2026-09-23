@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..contracts.content import deserialize_content_blocks, serialize_content_blocks
 from .models import Message, Session, new_session_id
 
 _SCHEMA = """
@@ -26,7 +27,8 @@ CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
     role TEXT NOT NULL,
-    content TEXT NOT NULL,
+    content_json TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
     tool_calls_json TEXT,
     tool_call_id TEXT,
     name TEXT,
@@ -51,12 +53,6 @@ class SessionStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON;")
         self._conn.executescript(_SCHEMA)
-        columns = {
-            str(row["name"])
-            for row in self._conn.execute("PRAGMA table_info(messages)").fetchall()
-        }
-        if "reasoning" not in columns:
-            self._conn.execute("ALTER TABLE messages ADD COLUMN reasoning TEXT")
         self._conn.commit()
 
     # ---------- Session CRUD ---------- #
@@ -114,12 +110,18 @@ class SessionStore:
         now = message.created_at or _now_iso()
         self._conn.execute(
             "INSERT INTO messages "
-            "(session_id, role, content, tool_calls_json, tool_call_id, name, reasoning, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "(session_id, role, content_json, metadata_json, tool_calls_json, "
+            "tool_call_id, name, reasoning, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id,
                 message.role,
-                message.content or "",
+                json.dumps(
+                    serialize_content_blocks(message.content),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                json.dumps(message.metadata, ensure_ascii=False, sort_keys=True),
                 json.dumps(message.tool_calls, ensure_ascii=False) if message.tool_calls else None,
                 message.tool_call_id,
                 message.name,
@@ -135,16 +137,24 @@ class SessionStore:
 
     def _load_messages(self, session_id: str) -> list[Message]:
         rows = self._conn.execute(
-            "SELECT role, content, tool_calls_json, tool_call_id, name, reasoning, created_at "
+            "SELECT role, content_json, metadata_json, tool_calls_json, "
+            "tool_call_id, name, reasoning, created_at "
             "FROM messages WHERE session_id = ? ORDER BY id ASC",
             (session_id,),
         ).fetchall()
         out: list[Message] = []
         for r in rows:
+            raw_content = json.loads(r["content_json"])
+            if not isinstance(raw_content, list):
+                raise ValueError("messages.content_json 必须是 JSON 数组")
+            raw_metadata = json.loads(r["metadata_json"] or "{}")
+            if not isinstance(raw_metadata, dict):
+                raise ValueError("messages.metadata_json 必须是 JSON 对象")
             out.append(
                 Message(
                     role=r["role"],
-                    content=r["content"] or "",
+                    content=deserialize_content_blocks(raw_content),
+                    metadata=raw_metadata,
                     tool_calls=json.loads(r["tool_calls_json"]) if r["tool_calls_json"] else None,
                     tool_call_id=r["tool_call_id"],
                     name=r["name"],

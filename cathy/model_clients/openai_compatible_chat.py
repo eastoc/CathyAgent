@@ -12,7 +12,14 @@ from typing import Any, Mapping, Sequence
 
 from openai import OpenAI
 
-from ..contracts import ModelRequest, ModelResponse, ModelTool, ModelToolCall
+from ..contracts import (
+    AttachmentResolver,
+    ModelRequest,
+    ModelResponse,
+    ModelTool,
+    ModelToolCall,
+)
+from ..contracts.content import attachment_from_dict
 from ..llm_errors import LLMCallError, classify_llm_exception
 
 
@@ -111,7 +118,10 @@ class OpenAICompatibleChatClient:
     def generate(self, request: ModelRequest) -> ModelResponse:
         """执行请求并把 Chat Completions 响应归一化为模型协议。"""
         response = self.chat(
-            convert_chat_messages(request.messages),
+            convert_chat_messages(
+                request.messages,
+                attachment_resolver=request.attachment_resolver,
+            ),
             tools=(
                 [convert_chat_tool(tool) for tool in request.tools]
                 if request.tools is not None
@@ -147,13 +157,18 @@ class OpenAICompatibleChatClient:
 
 def convert_chat_messages(
     messages: Sequence[Mapping[str, Any]],
+    *,
+    attachment_resolver: AttachmentResolver | None = None,
 ) -> list[dict[str, Any]]:
     """把内部模型消息转换为 Chat Completions 消息。"""
     converted: list[dict[str, Any]] = []
     for message in messages:
         item: dict[str, Any] = {
             "role": str(message.get("role") or "user"),
-            "content": message.get("content") or "",
+            "content": _convert_chat_content(
+                message.get("content"),
+                attachment_resolver=attachment_resolver,
+            ),
         }
         if message.get("tool_call_id"):
             item["tool_call_id"] = str(message["tool_call_id"])
@@ -166,6 +181,48 @@ def convert_chat_messages(
             item["tool_calls"] = [_convert_chat_tool_call(call) for call in tool_calls]
         converted.append(item)
     return converted
+
+
+def _convert_chat_content(
+    content: Any,
+    *,
+    attachment_resolver: AttachmentResolver | None,
+) -> Any:
+    if not isinstance(content, list):
+        return content or ""
+
+    parts: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, Mapping):
+            continue
+        part_type = str(part.get("type") or "")
+        if part_type in {"text", "input_text"}:
+            parts.append({"type": "text", "text": str(part.get("text") or "")})
+        elif part_type == "image":
+            attachment = part.get("attachment")
+            if not isinstance(attachment, Mapping):
+                raise ValueError("image content block 缺少 attachment")
+            if attachment_resolver is None:
+                raise ValueError("多模态请求包含附件，但未配置 attachment_resolver")
+            image_url: dict[str, Any] = {
+                "url": attachment_resolver.data_url(attachment_from_dict(attachment))
+            }
+            if part.get("detail"):
+                image_url["detail"] = str(part["detail"])
+            parts.append({"type": "image_url", "image_url": image_url})
+        elif part_type == "json":
+            body = json.dumps(part.get("value"), ensure_ascii=False, sort_keys=True)
+            label = str(part.get("label") or "").strip()
+            parts.append(
+                {"type": "text", "text": f"{label}: {body}" if label else body}
+            )
+        elif part_type == "file" and isinstance(part.get("attachment"), Mapping):
+            raise ValueError("通用 Chat Completions 适配器不支持 file content block")
+        else:
+            parts.append(dict(part))
+    if all(part.get("type") == "text" for part in parts):
+        return "\n".join(str(part.get("text") or "") for part in parts)
+    return parts
 
 
 def convert_chat_tool(tool: ModelTool) -> dict[str, Any]:

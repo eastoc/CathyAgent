@@ -8,10 +8,18 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Sequence
+
+from ..contracts.content import (
+    ContentBlock,
+    coerce_content_blocks,
+    content_blocks_to_model_content,
+    content_blocks_to_text,
+)
 
 
 def _now_iso() -> str:
@@ -26,15 +34,34 @@ def new_session_id() -> str:
 @dataclass
 class Message:
     role: str  # user / assistant / tool
-    content: str = ""
+    content: Sequence[ContentBlock] = field(default_factory=tuple)
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
     name: str | None = None
     reasoning: str | None = None
     created_at: str = field(default_factory=_now_iso)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.content, str):
+            raise TypeError("Message.content 必须是 ContentBlock 序列；请使用 text_content()")
+        self.content = coerce_content_blocks(self.content)
+        self.metadata = dict(self.metadata)
+        try:
+            json.dumps(self.metadata, ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Message.metadata 必须可 JSON 序列化") from exc
+
+    @property
+    def text(self) -> str:
+        """供 Hook、日志和 UI 使用的可读投影，不作为持久化真源。"""
+        return content_blocks_to_text(self.content)
 
     def to_model_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {"role": self.role, "content": self.content or ""}
+        d: dict[str, Any] = {
+            "role": self.role,
+            "content": content_blocks_to_model_content(self.content),
+        }
         if self.tool_calls:
             d["tool_calls"] = self.tool_calls
         if self.tool_call_id:

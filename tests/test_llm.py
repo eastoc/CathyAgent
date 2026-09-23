@@ -19,6 +19,11 @@ from cathy.llm import (  # noqa: E402
 )
 from cathy.llm_errors import LLMCallError  # noqa: E402
 from cathy.contracts import ModelClient, ModelRequest, ModelTool  # noqa: E402
+from cathy.artifacts import LocalArtifactStore  # noqa: E402
+from cathy.contracts import ImageBlock, TextBlock  # noqa: E402
+from cathy.contracts.content import serialize_content_blocks  # noqa: E402
+from cathy.contracts.content import text_model_content  # noqa: E402
+from cathy.model_clients.openai_compatible_chat import convert_chat_messages  # noqa: E402
 
 
 class _RetryableServerError(Exception):
@@ -26,6 +31,34 @@ class _RetryableServerError(Exception):
 
 
 class LLMClientTest(unittest.TestCase):
+    def test_chat_adapter_collapses_text_blocks_for_text_models(self) -> None:
+        messages = convert_chat_messages(
+            [{"role": "user", "content": text_model_content("你好")}]
+        )
+        self.assertEqual(messages, [{"role": "user", "content": "你好"}])
+
+    def test_chat_adapter_converts_neutral_image_attachment(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            store = LocalArtifactStore(td)
+            ref = store.put_bytes(b"image", mime_type="image/jpeg")
+            messages = convert_chat_messages(
+                [
+                    {
+                        "role": "user",
+                        "content": serialize_content_blocks(
+                            (TextBlock("观察"), ImageBlock(ref, detail="high"))
+                        ),
+                    }
+                ],
+                attachment_resolver=store,
+            )
+
+        image_url = messages[0]["content"][1]["image_url"]
+        self.assertTrue(image_url["url"].startswith("data:image/jpeg;base64,"))
+        self.assertEqual(image_url["detail"], "high")
+
     def test_uses_max_completion_tokens_for_new_openai_models(self) -> None:
         self.assertTrue(uses_max_completion_tokens("gpt-5.5"))
         self.assertTrue(uses_max_completion_tokens("gpt-5.4-mini"))

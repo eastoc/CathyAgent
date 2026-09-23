@@ -15,10 +15,14 @@ if str(PROJECT_ROOT) not in sys.path:
 from cathy.agent import Agent, AgentConfig  # noqa: E402
 from cathy.context import ContextAssembler  # noqa: E402
 from cathy.contracts import (  # noqa: E402
+    AgentRequest,
+    AttachmentRef,
+    ImageBlock,
     ModelRequest,
     ModelResponse,
     ModelToolCall,
     ModelTurnState,
+    TextBlock,
 )
 from cathy.plugins.base import ToolPlugin  # noqa: E402
 from cathy.plugins.manifest import Execution, PluginManifest, ToolSpec  # noqa: E402
@@ -77,6 +81,43 @@ def _registry() -> PluginRegistry:
 
 
 class AgentModelClientTest(unittest.TestCase):
+    def test_run_request_passes_neutral_multimodal_content(self) -> None:
+        model = _ScriptedModelClient([ModelResponse(text="看到了")])
+        ref = AttachmentRef(
+            artifact_id="sha256:" + "b" * 64,
+            mime_type="image/jpeg",
+            sha256="b" * 64,
+            size_bytes=10,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            store = SessionStore(Path(td) / "session.db")
+            session = store.create()
+            agent = Agent(
+                llm=model,
+                tools=_registry(),
+                assembler=ContextAssembler(token_budget=4096),
+                store=store,
+            )
+
+            answer, _trace = agent.run_request(
+                session,
+                AgentRequest(
+                    content=(TextBlock("看图"), ImageBlock(ref)),
+                    metadata={"task_id": "pick-1"},
+                ),
+            )
+            loaded = store.load(session.id)
+            store.close()
+
+        self.assertEqual(answer, "看到了")
+        content = model.requests[0].messages[-1]["content"]
+        self.assertIsInstance(content, list)
+        self.assertEqual(content[1]["attachment"]["artifact_id"], ref.artifact_id)
+        assert loaded is not None
+        self.assertEqual(loaded.messages[0].content[1], ImageBlock(ref))
+        self.assertEqual(loaded.messages[0].metadata["task_id"], "pick-1")
+
     def test_responses_tool_loop_uses_continuation_delta(self) -> None:
         model = _ScriptedModelClient(
             [
@@ -126,7 +167,10 @@ class AgentModelClientTest(unittest.TestCase):
             second.delta_messages[0]["tool_call_id"],
             "call_1",
         )
-        self.assertEqual(second.delta_messages[0]["content"], "echo:ping")
+        self.assertEqual(
+            second.delta_messages[0]["content"][0]["text"],
+            "echo:ping",
+        )
 
 
 if __name__ == "__main__":

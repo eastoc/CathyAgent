@@ -20,9 +20,18 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from .contracts.content import (
+    FileBlock,
+    ImageBlock,
+    JsonBlock,
+    TextBlock,
+    text_model_content,
+)
 
 if TYPE_CHECKING:
     from .hooks import HookManager
@@ -179,11 +188,13 @@ class ContextAssembler:
         - user_input 为 None 时不追加（适合 agent 内部循环里把工具结果 append 进 session 后再调一次 LLM）。
         - user_input 非 None 时**仅装配**进返回值，不写入 session（持久化由调用方负责）。
         """
-        msgs: list[dict] = [{"role": "system", "content": self.system_prompt}]
+        msgs: list[dict] = [
+            {"role": "system", "content": text_model_content(self.system_prompt)}
+        ]
         history = self._fit_to_budget(session.messages)
         msgs.extend(m.to_model_dict() for m in history)
         if user_input is not None and user_input != "":
-            msgs.append({"role": "user", "content": user_input})
+            msgs.append({"role": "user", "content": text_model_content(user_input)})
         return msgs
 
     def _fit_to_budget(self, msgs: list["Message"]) -> list["Message"]:
@@ -231,7 +242,24 @@ class ContextAssembler:
 
     @staticmethod
     def _msg_tokens(m: "Message") -> int:
-        cost = _estimate_tokens(m.content or "")
+        cost = 0
+        if m.content:
+            for part in m.content:
+                if isinstance(part, TextBlock):
+                    cost += _estimate_tokens(part.text)
+                elif isinstance(part, JsonBlock):
+                    cost += _estimate_tokens(
+                        json.dumps(part.value, ensure_ascii=False, sort_keys=True)
+                    )
+                elif isinstance(part, ImageBlock):
+                    cost += {
+                        "low": 256,
+                        "auto": 1024,
+                        "high": 1024,
+                        "original": 2048,
+                    }[part.detail]
+                elif isinstance(part, FileBlock):
+                    cost += 128 + _estimate_tokens(part.attachment.filename or "")
         if m.tool_calls:
             for tc in m.tool_calls:
                 function = tc.get("function") or {}

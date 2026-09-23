@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from ..contracts import ModelClient, ModelTool, ModelToolCall
+from ..contracts.content import text_model_content
 from ..llm_errors import LLMCallError
 from ..model_clients import generate_model_response
 from .base import SubagentResult
@@ -58,8 +59,8 @@ class SubagentRunner:
 
     def run(self, user_input: str) -> SubagentResult:
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": user_input},
+            {"role": "system", "content": text_model_content(self.system_prompt)},
+            {"role": "user", "content": text_model_content(user_input)},
         ]
         result = SubagentResult(final_answer="")
         model_tools = self.tools.model_tools() or None
@@ -95,7 +96,7 @@ class SubagentRunner:
             tool_calls_dicts = _tool_calls_to_dicts(response.tool_calls)
             assistant_dict: dict[str, Any] = {
                 "role": "assistant",
-                "content": response.text or "",
+                "content": text_model_content(response.text or ""),
                 "tool_calls": tool_calls_dicts,
             }
             if response.reasoning:
@@ -120,7 +121,7 @@ class SubagentRunner:
                 )
                 tool_message = {
                     "role": "tool",
-                    "content": output,
+                    "content": text_model_content(output),
                     "tool_call_id": tc.id,
                     "name": name,
                 }

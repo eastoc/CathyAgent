@@ -20,7 +20,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .contracts import ModelClient, ModelToolCall
+from .contracts import AgentRequest, AttachmentResolver, ModelClient, ModelToolCall
+from .contracts.content import serialize_content_blocks, text_content, text_model_content
 from .context import ContextAssembler
 from .hooks import (
     HookEvent,
@@ -76,6 +77,7 @@ class Agent:
         on_event: Callable[[str, dict], None] | None = None,
         hooks: HookManager | None = None,
         permission_cfg: dict[str, Any] | None = None,
+        attachment_resolver: AttachmentResolver | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -85,6 +87,7 @@ class Agent:
         self._on_event = on_event or (lambda _t, _p: None)
         self.hooks = hooks  # None -> 等价于"没装 hook"，零开销
         self.permission_cfg = permission_cfg or {}
+        self.attachment_resolver = attachment_resolver
 
     # ---------------- hooks 辅助 ---------------- #
 
@@ -97,25 +100,45 @@ class Agent:
     # ---------------- 主入口 ---------------- #
 
     def run(self, session: Session, user_input: str) -> tuple[str, AgentTrace]:
+        """向后兼容的纯文本入口。"""
+        return self.run_request(session, AgentRequest.from_text(user_input))
+
+    def run_request(
+        self,
+        session: Session,
+        request: AgentRequest,
+    ) -> tuple[str, AgentTrace]:
+        """执行一次文本或多模态请求。"""
+        user_input = request.text
         # === Hook 1/4: UserPromptSubmit（user 消息持久化前） ===
         injected_after_user: list[str] = []
         decision = self._dispatch(
             USER_PROMPT_SUBMIT,
             session_id=session.id,
-            payload={"user_input": user_input},
+            payload={
+                "user_input": user_input,
+                "content": serialize_content_blocks(request.content),
+                "attachment_ids": list(request.attachment_ids),
+                "metadata": dict(request.metadata),
+            },
         )
         if decision is not None:
             if decision.rewrite_user_input is not None:
                 user_input = str(decision.rewrite_user_input)
+                request = request.with_text(user_input)
             if decision.inject_context:
                 injected_after_user.append(decision.inject_context)
             if decision.block:
                 reason = decision.block_reason or "[hook:UserPromptSubmit] 已阻断"
                 # 持久化 user + assistant(=block 提示)，让会话历史可解释
-                user_msg = Message(role="user", content=user_input)
+                user_msg = Message(
+                    role="user",
+                    content=request.content,
+                    metadata=dict(request.metadata),
+                )
                 self.store.append_message(session.id, user_msg)
                 session.append(user_msg)
-                blocked_msg = Message(role="assistant", content=reason)
+                blocked_msg = Message(role="assistant", content=text_content(reason))
                 self.store.append_message(session.id, blocked_msg)
                 session.append(blocked_msg)
                 trace = AgentTrace()
@@ -124,7 +147,11 @@ class Agent:
                 return reason, trace
 
         # 1) 持久化 user 消息
-        user_msg = Message(role="user", content=user_input)
+        user_msg = Message(
+            role="user",
+            content=request.content,
+            metadata=dict(request.metadata),
+        )
         self.store.append_message(session.id, user_msg)
         session.append(user_msg)
 
@@ -132,7 +159,12 @@ class Agent:
         messages = self.assembler.assemble(session)
         # UserPromptSubmit 注入的临时上下文以 system 形式放在 user 之后，仅本轮可见、不持久化
         for ctx in injected_after_user:
-            messages.append({"role": "system", "content": f"[hook:UserPromptSubmit] {ctx}"})
+            messages.append(
+                {
+                    "role": "system",
+                    "content": text_model_content(f"[hook:UserPromptSubmit] {ctx}"),
+                }
+            )
 
         trace = AgentTrace()
         model_tools = self.tools.model_tools() or None
@@ -148,10 +180,11 @@ class Agent:
                     stage="main_react",
                     turn_state=turn_state,
                     delta_messages=delta_messages,
+                    attachment_resolver=self.attachment_resolver,
                 )
             except LLMCallError as exc:
                 content = _llm_error_message(exc)
-                assistant_msg = Message(role="assistant", content=content)
+                assistant_msg = Message(role="assistant", content=text_content(content))
                 self.store.append_message(session.id, assistant_msg)
                 session.append(assistant_msg)
                 trace.add("llm_error", {"step": step, "failure": exc.failure.to_dict()})
@@ -177,7 +210,10 @@ class Agent:
                             f"[hook:Stop] 你刚才的回答被拦截：{reason}。"
                             "请基于现有上下文重新作答。"
                         )
-                        nudge_message = {"role": "system", "content": nudge}
+                        nudge_message = {
+                            "role": "system",
+                            "content": text_model_content(nudge),
+                        }
                         messages.append(nudge_message)
                         turn_state = response.next_turn_state
                         delta_messages = [nudge_message]
@@ -185,7 +221,7 @@ class Agent:
                         self._on_event("hook", {"event": STOP, "blocked": True, "reason": reason})
                         continue
 
-                assistant_msg = Message(role="assistant", content=content)
+                assistant_msg = Message(role="assistant", content=text_content(content))
                 self.store.append_message(session.id, assistant_msg)
                 session.append(assistant_msg)
                 trace.add("final", {"step": step, "content": content})
@@ -196,7 +232,7 @@ class Agent:
             tool_calls_dicts = _model_tool_calls_to_dicts(response.tool_calls)
             assistant_msg = Message(
                 role="assistant",
-                content=response.text or "",
+                content=text_content(response.text or ""),
                 tool_calls=tool_calls_dicts,
                 reasoning=response.reasoning,
             )
@@ -262,7 +298,12 @@ class Agent:
                             "hook_blocked",
                             {"event": PRE_TOOL_USE, "tool": name, "reason": reason, "step": step},
                         )
-                        tool_msg = Message(role="tool", content=result, tool_call_id=tc.id, name=name)
+                        tool_msg = Message(
+                            role="tool",
+                            content=text_content(result),
+                            tool_call_id=tc.id,
+                            name=name,
+                        )
                         self.store.append_message(session.id, tool_msg)
                         session.append(tool_msg)
                         tool_message = tool_msg.to_model_dict()
@@ -298,7 +339,12 @@ class Agent:
                 self._on_event("tool_result", {"name": name, "result": result})
                 trace.add("tool_result", {"step": step, "name": name, "result": result})
 
-                tool_msg = Message(role="tool", content=result, tool_call_id=tc.id, name=name)
+                tool_msg = Message(
+                    role="tool",
+                    content=text_content(result),
+                    tool_call_id=tc.id,
+                    name=name,
+                )
                 self.store.append_message(session.id, tool_msg)
                 session.append(tool_msg)
                 tool_message = tool_msg.to_model_dict()

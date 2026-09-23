@@ -130,7 +130,7 @@ class SubagentRunnerTest(unittest.TestCase):
         self.assertEqual(roles[:2], ["system", "user"])
         self.assertEqual(roles[-2], "assistant")
         self.assertEqual(roles[-1], "tool")
-        self.assertEqual(second_messages[-1]["content"], "echo:ping")
+        self.assertEqual(second_messages[-1]["content"][0]["text"], "echo:ping")
 
     def test_max_steps_exit_when_loop_never_returns(self) -> None:
         infinite_call = _make_response(
