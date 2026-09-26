@@ -309,5 +309,40 @@ class HookManagerTests(unittest.TestCase):
             self.assertEqual(d.inject_context, "A\n\nB")
 
 
+class AsyncHookManagerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_adispatch_preserves_order_and_block_short_circuit(self) -> None:
+        _reset_log()
+        manager = HookManager(
+            {
+                PRE_TOOL_USE: [
+                    {
+                        "hooks": [
+                            {
+                                "type": "python",
+                                "target": "tests.test_hooks_manager:hk_inject_a",
+                            },
+                            {
+                                "type": "python",
+                                "target": "tests.test_hooks_manager:hk_block",
+                            },
+                            {
+                                "type": "python",
+                                "target": "tests.test_hooks_manager:hk_should_not_run",
+                            },
+                        ]
+                    }
+                ]
+            }
+        )
+
+        decision = await manager.adispatch(
+            HookEvent(type=PRE_TOOL_USE, matcher_target="write_file")
+        )
+
+        self.assertTrue(decision.block)
+        self.assertEqual(decision.inject_context, "A")
+        self.assertEqual(CALL_LOG, ["a", "block"])
+
+
 if __name__ == "__main__":
     unittest.main()

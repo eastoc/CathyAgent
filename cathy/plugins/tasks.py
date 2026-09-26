@@ -10,7 +10,7 @@ from typing import Any
 from ..contracts import ModelTurnState, ToolInvocation, ToolResult, ToolTaskRecord
 from ..contracts.content import serialize_content_blocks
 from ..logger import get_logger
-from ..session.store import SessionStore
+from ..session.store import AsyncSessionStore, SessionStore
 from .scheduler import ToolScheduler
 
 logger = get_logger(__name__)
@@ -32,13 +32,14 @@ class TaskRegistry:
         self,
         *,
         scheduler: ToolScheduler,
-        store: SessionStore,
+        store: SessionStore | AsyncSessionStore,
         on_transition: Callable[[ToolTaskRecord], None] | None = None,
     ) -> None:
         self._scheduler = scheduler
         self._store = store
         self._on_transition = on_transition or (lambda _record: None)
         self._running: dict[str, asyncio.Task[ToolTaskRecord]] = {}
+        self._task_locks: dict[str, asyncio.Lock] = {}
 
     async def submit(
         self,
@@ -73,7 +74,7 @@ class TaskRegistry:
             latest_response_id=latest_response_id,
             metadata=metadata,
         )
-        self._store.create_tool_task(record)
+        await self._store_call("acreate_tool_task", "create_tool_task", record)
         self._notify(record)
 
         task = asyncio.create_task(
@@ -94,13 +95,13 @@ class TaskRegistry:
             except asyncio.CancelledError:
                 if not task.cancelled():
                     raise
-        record = self._require(task_id)
+        record = await self._arequire(task_id)
         if record.status not in _TERMINAL_STATUSES and task is None:
             raise RuntimeError(f"任务 {task_id} 没有运行句柄且状态为 {record.status}")
         return record
 
     async def cancel(self, task_id: str) -> ToolTaskRecord:
-        record = self._require(task_id)
+        record = await self._arequire(task_id)
         if record.status in _TERMINAL_STATUSES:
             return record
         policy = self._scheduler.get_policy(record.invocation.name)
@@ -111,9 +112,9 @@ class TaskRegistry:
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        record = self._require(task_id)
+        record = await self._arequire(task_id)
         if task is None and record.status not in _TERMINAL_STATUSES:
-            record = self._transition(
+            record = await self._atransition(
                 record,
                 status="cancelled",
                 result=ToolResult.cancelled(
@@ -126,11 +127,17 @@ class TaskRegistry:
         return record
 
     async def cancel_run(self, run_id: str) -> list[ToolTaskRecord]:
-        records = self._store.list_tool_tasks(run_id=run_id)
+        records = await self.alist(run_id=run_id)
         return await asyncio.gather(*(self.cancel(record.task_id) for record in records))
 
     def get(self, task_id: str) -> ToolTaskRecord | None:
-        return self._store.load_tool_task(task_id)
+        load = getattr(self._store, "load_tool_task", None)
+        if not callable(load):
+            raise RuntimeError("异步 Store 请使用 await TaskRegistry.aget()")
+        return load(task_id)
+
+    async def aget(self, task_id: str) -> ToolTaskRecord | None:
+        return await self._store_call("aload_tool_task", "load_tool_task", task_id)
 
     def list(
         self,
@@ -140,7 +147,27 @@ class TaskRegistry:
         statuses: tuple[str, ...] | None = None,
         limit: int = 100,
     ) -> list[ToolTaskRecord]:
-        return self._store.list_tool_tasks(
+        list_tasks = getattr(self._store, "list_tool_tasks", None)
+        if not callable(list_tasks):
+            raise RuntimeError("异步 Store 请使用 await TaskRegistry.alist()")
+        return list_tasks(
+            run_id=run_id,
+            session_id=session_id,
+            statuses=statuses,
+            limit=limit,
+        )
+
+    async def alist(
+        self,
+        *,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        statuses: tuple[str, ...] | None = None,
+        limit: int = 100,
+    ) -> list[ToolTaskRecord]:
+        return await self._store_call(
+            "alist_tool_tasks",
+            "list_tool_tasks",
             run_id=run_id,
             session_id=session_id,
             statuses=statuses,
@@ -158,6 +185,18 @@ class TaskRegistry:
         self._notify(updated)
         return updated
 
+    async def aupdate_latest_response_id(
+        self,
+        task_id: str,
+        latest_response_id: str,
+    ) -> ToolTaskRecord:
+        async with self._task_lock(task_id):
+            record = await self._arequire(task_id)
+            updated = record.with_updates(latest_response_id=latest_response_id)
+            await self._store_call("aupdate_tool_task", "update_tool_task", updated)
+            self._notify(updated)
+            return updated
+
     def update_metadata(self, task_id: str, **values: Any) -> ToolTaskRecord:
         """合并任务元数据，用于记录 continuation 是否已经回填。"""
 
@@ -166,6 +205,18 @@ class TaskRegistry:
         self._store.update_tool_task(updated)
         self._notify(updated)
         return updated
+
+    async def aupdate_metadata(
+        self,
+        task_id: str,
+        **values: Any,
+    ) -> ToolTaskRecord:
+        async with self._task_lock(task_id):
+            record = await self._arequire(task_id)
+            updated = record.with_updates(metadata={**dict(record.metadata), **values})
+            await self._store_call("aupdate_tool_task", "update_tool_task", updated)
+            self._notify(updated)
+            return updated
 
     def build_model_continuation(
         self,
@@ -191,6 +242,13 @@ class TaskRegistry:
             },
         )
 
+    async def abuild_model_continuation(
+        self,
+        task_id: str,
+    ) -> tuple[ModelTurnState, dict[str, Any]]:
+        record = await self._arequire(task_id)
+        return self._build_model_continuation_from_record(record)
+
     def mark_interrupted_tasks_orphaned(self) -> list[ToolTaskRecord]:
         """启动恢复时调用；不自动重放可能带副作用的工具。"""
 
@@ -208,12 +266,27 @@ class TaskRegistry:
             out.append(updated)
         return out
 
+    async def amark_interrupted_tasks_orphaned(self) -> list[ToolTaskRecord]:
+        interrupted = await self.alist(statuses=("queued", "running"))
+        out: list[ToolTaskRecord] = []
+        for record in interrupted:
+            if record.task_id in self._running:
+                continue
+            updated = await self._atransition(
+                record,
+                status="orphaned",
+                error_message="进程重启或任务句柄丢失，需要显式恢复",
+                finished_at=time.time(),
+            )
+            out.append(updated)
+        return out
+
     async def shutdown(self, *, cancel: bool = True) -> None:
         running = list(self._running.items())
         tasks = [task for _task_id, task in running]
         if cancel:
             for task_id, task in running:
-                record = self._store.load_tool_task(task_id)
+                record = await self.aget(task_id)
                 if record is None:
                     continue
                 policy = self._scheduler.get_policy(record.invocation.name)
@@ -223,8 +296,8 @@ class TaskRegistry:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _run(self, task_id: str) -> ToolTaskRecord:
-        record = self._require(task_id)
-        record = self._transition(
+        record = await self._arequire(task_id)
+        record = await self._atransition(
             record,
             status="running",
             started_at=time.time(),
@@ -236,7 +309,7 @@ class TaskRegistry:
                 call_id=record.invocation.call_id,
                 tool_name=record.invocation.name,
             )
-            self._transition(
+            await self._atransition(
                 record,
                 status="cancelled",
                 result=cancelled,
@@ -255,7 +328,7 @@ class TaskRegistry:
         final_status = result.status
         if final_status not in {"succeeded", "failed", "cancelled", "timed_out"}:
             final_status = "failed"
-        return self._transition(
+        return await self._atransition(
             record,
             status=final_status,
             result=result,
@@ -273,11 +346,69 @@ class TaskRegistry:
         self._notify(updated)
         return updated
 
+    async def _atransition(
+        self,
+        record: ToolTaskRecord,
+        **values: Any,
+    ) -> ToolTaskRecord:
+        async with self._task_lock(record.task_id):
+            latest = await self.aget(record.task_id) or record
+            updated = latest.with_updates(**values)
+            await self._store_call("aupdate_tool_task", "update_tool_task", updated)
+            self._notify(updated)
+            return updated
+
     def _require(self, task_id: str) -> ToolTaskRecord:
         record = self._store.load_tool_task(task_id)
         if record is None:
             raise KeyError(f"工具任务不存在: {task_id}")
         return record
+
+    async def _arequire(self, task_id: str) -> ToolTaskRecord:
+        record = await self.aget(task_id)
+        if record is None:
+            raise KeyError(f"工具任务不存在: {task_id}")
+        return record
+
+    @staticmethod
+    def _build_model_continuation_from_record(
+        record: ToolTaskRecord,
+    ) -> tuple[ModelTurnState, dict[str, Any]]:
+        if record.status not in {"succeeded", "failed", "timed_out", "cancelled"}:
+            raise RuntimeError(f"任务 {record.task_id} 尚未结束: {record.status}")
+        if record.result is None:
+            raise RuntimeError(f"任务 {record.task_id} 没有可返回的 ToolResult")
+        if not record.latest_response_id:
+            raise RuntimeError(f"任务 {record.task_id} 缺少 latest_response_id")
+        call_id = record.provider_call_id or record.invocation.call_id
+        return (
+            ModelTurnState(record.latest_response_id),
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": record.invocation.name,
+                "content": serialize_content_blocks(record.result.content),
+            },
+        )
+
+    async def _store_call(
+        self,
+        async_name: str,
+        sync_name: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        async_method = getattr(self._store, async_name, None)
+        if callable(async_method):
+            return await async_method(*args, **kwargs)
+        return getattr(self._store, sync_name)(*args, **kwargs)
+
+    def _task_lock(self, task_id: str) -> asyncio.Lock:
+        lock = self._task_locks.get(task_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._task_locks[task_id] = lock
+        return lock
 
     def _notify(self, record: ToolTaskRecord) -> None:
         try:

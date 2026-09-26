@@ -20,6 +20,7 @@ from .model import (
     ModelToolCall,
     ModelTurnState,
 )
+from .run import EventSink, RunRecord
 from .tool import (
     ToolExecutionPolicy,
     ToolInvocation,
@@ -36,6 +37,7 @@ __all__ = [
     "AttachmentRef",
     "AttachmentResolver",
     "ContentBlock",
+    "EventSink",
     "FileBlock",
     "ImageBlock",
     "JsonBlock",
@@ -48,6 +50,7 @@ __all__ = [
     "ModelToolCall",
     "ModelTurnState",
     "RunContext",
+    "RunRecord",
     "TextBlock",
     "ToolExecutionPolicy",
     "ToolInvocation",

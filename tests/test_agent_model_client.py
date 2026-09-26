@@ -28,7 +28,8 @@ from cathy.contracts import (  # noqa: E402
 from cathy.plugins.base import ToolPlugin  # noqa: E402
 from cathy.plugins.manifest import Execution, PluginManifest, ToolSpec  # noqa: E402
 from cathy.plugins.registry import PluginRegistry  # noqa: E402
-from cathy.session.store import SessionStore  # noqa: E402
+from cathy.session.store import AsyncSessionStore, SessionStore  # noqa: E402
+from cathy.telemetry import RunJournal  # noqa: E402
 
 
 class _EchoPlugin(ToolPlugin):
@@ -470,6 +471,42 @@ class AgentPendingToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             model.requests[2].delta_messages[0]["tool_call_id"],
             "call_async_2",
+        )
+
+
+class AsyncStoreAgentTest(unittest.IsolatedAsyncioTestCase):
+    async def test_agent_persists_with_async_store(self) -> None:
+        model = _ScriptedModelClient([ModelResponse(text="异步持久化完成")])
+
+        with tempfile.TemporaryDirectory() as td:
+            store = await AsyncSessionStore.open(Path(td) / "session.db")
+            session = await store.acreate("async-agent")
+            agent = Agent(
+                llm=model,
+                tools=_registry(),
+                assembler=ContextAssembler(token_budget=4096),
+                store=store,
+                event_sink=RunJournal(store),
+            )
+
+            result = await agent.arun(session, "执行")
+            loaded = await store.aload(session.id)
+            persisted_run = await store.aload_run(result.run_id)
+            persisted_events = await store.alist_events(result.run_id)
+            await agent.task_registry.shutdown()
+            await store.aclose()
+
+        self.assertEqual(result.content, "异步持久化完成")
+        self.assertIsNotNone(loaded)
+        self.assertIsNotNone(persisted_run)
+        assert persisted_run is not None
+        self.assertEqual(persisted_run.status, "completed")
+        self.assertEqual(persisted_events[0].type, "run_started")
+        self.assertEqual(persisted_events[-1].type, "run_completed")
+        assert loaded is not None
+        self.assertEqual(
+            [message.text for message in loaded.messages],
+            ["执行", "异步持久化完成"],
         )
 
 

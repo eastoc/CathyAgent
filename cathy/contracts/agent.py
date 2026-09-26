@@ -74,6 +74,8 @@ class RunContext:
     """
 
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    root_run_id: str | None = None
+    parent_run_id: str | None = None
     episode_id: str | None = None
     env_idx: int | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -97,6 +99,8 @@ class AgentEvent:
     sequence: int
     timestamp: float
     payload: Mapping[str, Any] = field(default_factory=dict)
+    event_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    schema_version: int = 1
 
 
 @dataclass(frozen=True)

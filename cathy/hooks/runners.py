@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
+import inspect
 import json
 import subprocess
 import time
@@ -78,16 +80,30 @@ class PythonRunner:
         except Exception:
             return HookDecision.noop(), traceback.format_exc()
 
-        if result is None:
-            return HookDecision.noop(), ""
-        if isinstance(result, HookDecision):
-            return result, ""
-        if isinstance(result, dict):
-            return HookDecision.from_dict(result), ""
-        return (
-            HookDecision.noop(),
-            f"hook 返回类型不支持: {type(result).__name__}（应为 HookDecision/dict/None）",
-        )
+        if inspect.isawaitable(result):
+            close = getattr(result, "close", None)
+            if callable(close):
+                close()
+            return (
+                HookDecision.noop(),
+                "异步 python hook 不能通过同步 dispatch 执行，请使用 adispatch",
+            )
+        return _normalize_python_result(result)
+
+    async def arun(self, event: HookEvent) -> tuple[HookDecision, str]:
+        """异步执行 Hook；同步函数在线程池运行，协程函数直接 await。"""
+        try:
+            fn = self._resolve()
+            if inspect.iscoroutinefunction(fn):
+                result = await fn(event)
+            else:
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(None, fn, event)
+                if inspect.isawaitable(result):
+                    result = await result
+        except Exception:
+            return HookDecision.noop(), traceback.format_exc()
+        return _normalize_python_result(result)
 
 
 class CommandRunner:
@@ -129,34 +145,98 @@ class CommandRunner:
         except Exception:
             return HookDecision.noop(), traceback.format_exc()
 
-        if proc.returncode == 2:
-            reason = (proc.stderr or proc.stdout or "command hook blocked").strip()
-            return HookDecision(block=True, block_reason=reason), ""
+        return _normalize_command_result(
+            proc.returncode,
+            proc.stdout or "",
+            proc.stderr or "",
+        )
 
-        if proc.returncode != 0:
-            return (
-                HookDecision.noop(),
-                f"command hook exit={proc.returncode} stderr={proc.stderr!r}",
-            )
-
-        stdout = (proc.stdout or "").strip()
-        if not stdout:
-            return HookDecision.noop(), ""
-
+    async def arun(self, event: HookEvent) -> tuple[HookDecision, str]:
+        """使用 asyncio 子进程执行 command hook，避免阻塞 Agent 事件循环。"""
+        payload = event.to_json().encode("utf-8")
         try:
-            data = json.loads(stdout)
-        except json.JSONDecodeError as exc:
-            return (
-                HookDecision.noop(),
-                f"command hook stdout 不是合法 JSON: {exc}; 原文={stdout[:200]!r}",
+            proc = await asyncio.create_subprocess_exec(
+                "/bin/sh",
+                "-c",
+                self._spec.command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
+            try:
+                stdout_raw, stderr_raw = await asyncio.wait_for(
+                    proc.communicate(payload),
+                    timeout=max(0.1, float(self._spec.timeout_sec)),
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                return (
+                    HookDecision.noop(),
+                    f"command hook 超时 ({self._spec.timeout_sec}s): "
+                    f"{self._spec.command!r}",
+                )
+        except asyncio.CancelledError:
+            if "proc" in locals() and proc.returncode is None:
+                proc.kill()
+                await proc.communicate()
+            raise
+        except Exception:
+            return HookDecision.noop(), traceback.format_exc()
 
-        if not isinstance(data, dict):
-            return (
-                HookDecision.noop(),
-                f"command hook stdout JSON 顶层必须是对象，得到 {type(data).__name__}",
-            )
-        return HookDecision.from_dict(data), ""
+        return _normalize_command_result(
+            int(proc.returncode or 0),
+            stdout_raw.decode("utf-8", errors="replace"),
+            stderr_raw.decode("utf-8", errors="replace"),
+        )
+
+
+def _normalize_python_result(result: Any) -> tuple[HookDecision, str]:
+    if result is None:
+        return HookDecision.noop(), ""
+    if isinstance(result, HookDecision):
+        return result, ""
+    if isinstance(result, dict):
+        return HookDecision.from_dict(result), ""
+    return (
+        HookDecision.noop(),
+        f"hook 返回类型不支持: {type(result).__name__}（应为 HookDecision/dict/None）",
+    )
+
+
+def _normalize_command_result(
+    returncode: int,
+    stdout_text: str,
+    stderr_text: str,
+) -> tuple[HookDecision, str]:
+    if returncode == 2:
+        reason = (stderr_text or stdout_text or "command hook blocked").strip()
+        return HookDecision(block=True, block_reason=reason), ""
+
+    if returncode != 0:
+        return (
+            HookDecision.noop(),
+            f"command hook exit={returncode} stderr={stderr_text!r}",
+        )
+
+    stdout = stdout_text.strip()
+    if not stdout:
+        return HookDecision.noop(), ""
+
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        return (
+            HookDecision.noop(),
+            f"command hook stdout 不是合法 JSON: {exc}; 原文={stdout[:200]!r}",
+        )
+
+    if not isinstance(data, dict):
+        return (
+            HookDecision.noop(),
+            f"command hook stdout JSON 顶层必须是对象，得到 {type(data).__name__}",
+        )
+    return HookDecision.from_dict(data), ""
 
 
 def build_runner(spec: HookSpec) -> PythonRunner | CommandRunner:

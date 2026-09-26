@@ -422,6 +422,10 @@ class ToolView:
     def attach_session(self, session_id: str) -> None:
         self._registry.attach_session(session_id)
 
+    def shutdown(self) -> None:
+        """关闭底层 Registry 持有的插件资源。"""
+        self._registry.shutdown()
+
 
 def _instantiate_plugin(manifest: PluginManifest) -> ToolPlugin:
     """按 execution.entrypoint = 'main:ClassName' 加载并实例化。"""

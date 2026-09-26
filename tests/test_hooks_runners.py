@@ -41,6 +41,10 @@ def hook_raises(event: HookEvent) -> HookDecision:
     raise RuntimeError("boom")
 
 
+async def hook_async(event: HookEvent) -> HookDecision:
+    return HookDecision(inject_context=f"async:{event.type}")
+
+
 class PythonRunnerTests(unittest.TestCase):
     def test_returns_decision_passthrough(self) -> None:
         spec = HookSpec(runner_type="python", target="tests.test_hooks_runners:hook_returns_decision")
@@ -129,6 +133,35 @@ class CommandRunnerTests(unittest.TestCase):
         )
         self.assertEqual(err, "")
         self.assertEqual(d.inject_context, "write_file")
+
+
+class AsyncRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_python_runner_awaits_coroutine_hook(self) -> None:
+        runner = build_runner(
+            HookSpec(
+                runner_type="python",
+                target="tests.test_hooks_runners:hook_async",
+            )
+        )
+
+        decision, error = await runner.arun(HookEvent(type=USER_PROMPT_SUBMIT))
+
+        self.assertEqual(error, "")
+        self.assertEqual(decision.inject_context, f"async:{USER_PROMPT_SUBMIT}")
+
+    async def test_command_runner_uses_async_subprocess(self) -> None:
+        command = (
+            "python3 -c 'import json; "
+            "print(json.dumps({\"inject_context\": \"async-command\"}))'"
+        )
+        runner = build_runner(
+            HookSpec(runner_type="command", command=command, timeout_sec=5)
+        )
+
+        decision, error = await runner.arun(HookEvent(type=USER_PROMPT_SUBMIT))
+
+        self.assertEqual(error, "")
+        self.assertEqual(decision.inject_context, "async-command")
 
 
 if __name__ == "__main__":

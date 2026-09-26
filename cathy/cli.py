@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -31,7 +32,7 @@ from .mcp import (  # noqa: E402
     normalize_root_uri,
 )
 from .plugins import PluginError, PluginRegistry, build_tool_catalog  # noqa: E402
-from .session.store import SessionStore  # noqa: E402
+from .session.store import AsyncSessionStore, SessionStore  # noqa: E402
 from .plugins.registry import ToolView  # noqa: E402
 from .skills import (  # noqa: E402
     SkillsPlugin,
@@ -40,8 +41,7 @@ from .skills import (  # noqa: E402
     discover_skills,
 )
 from .subagent import SubagentToolPlugin, build_subagent_tool_manifest  # noqa: E402
-from subagents.planner_executor import PlannerExecutorSubagent  # noqa: E402
-from subagents.search_agent import SearchAgent  # noqa: E402
+from .telemetry import RawRunExporter, RunJournal  # noqa: E402
 
 
 BANNER = """\
@@ -189,7 +189,15 @@ def _select_hooks_config(cfg: dict[str, Any]) -> tuple[dict[str, Any], str]:
     return slim, "mvp"
 
 
-def build_runtime(cfg: dict | None = None) -> tuple[Agent, SessionStore, HookManager]:
+def build_runtime(
+    cfg: dict | None = None,
+    *,
+    store: SessionStore | AsyncSessionStore | None = None,
+) -> tuple[Agent, SessionStore | AsyncSessionStore, HookManager]:
+    # 离线 RunJournal 导出不需要加载 LangGraph；Subagent 只在构建 Agent 时导入。
+    from subagents.planner_executor import PlannerExecutorSubagent
+    from subagents.search_agent import SearchAgent
+
     cfg = cfg if cfg is not None else load_config()
     llm_conf = get_llm(cfg)
     provider = llm_conf.get("name") or get_llm_provider(cfg)
@@ -273,7 +281,7 @@ def build_runtime(cfg: dict | None = None) -> tuple[Agent, SessionStore, HookMan
         hooks=hooks,
     )
 
-    store = SessionStore(_resolve_db_path(cfg))
+    store = store or SessionStore(_resolve_db_path(cfg))
     artifact_store = LocalArtifactStore(_resolve_artifacts_path(cfg))
 
     agent = Agent(
@@ -286,7 +294,23 @@ def build_runtime(cfg: dict | None = None) -> tuple[Agent, SessionStore, HookMan
         hooks=hooks,
         permission_cfg=dict(cfg.get("PERMISSION") or {}),
         attachment_resolver=artifact_store,
+        event_sink=RunJournal(store),
     )
+    return agent, store, hooks
+
+
+async def build_async_runtime(
+    cfg: dict | None = None,
+) -> tuple[Agent, AsyncSessionStore, HookManager]:
+    """构建由单一事件循环持有的 CLI Runtime。"""
+    resolved_cfg = cfg if cfg is not None else load_config()
+    store = await AsyncSessionStore.open(_resolve_db_path(resolved_cfg))
+    try:
+        agent, built_store, hooks = build_runtime(resolved_cfg, store=store)
+    except BaseException:
+        await store.aclose()
+        raise
+    assert built_store is store
     return agent, store, hooks
 
 
@@ -294,6 +318,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="cathy", description="CathyAgent CLI")
     p.add_argument("--session", default=None, help="指定会话 ID 续聊；不传则新建")
     p.add_argument("--list-sessions", action="store_true", help="列出最近的会话并退出")
+    p.add_argument(
+        "--export-runs",
+        metavar="PATH",
+        help="把 RunJournal 无损导出为 cathy.raw-run.v1 JSONL",
+    )
     return p.parse_args(argv)
 
 
@@ -307,48 +336,149 @@ def _print_session_list(store: SessionStore) -> None:
         print(f"{r['id']:10} {r['updated_at']:25} {r['msg_count']:>5}  {r['created_at']}")
 
 
-def main() -> None:
-    configure_logging()
-    args = _parse_args()
-    agent, store, hooks = build_runtime()
+def _print_session_rows(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        print("(暂无会话)")
+        return
+    print(f"{'ID':10} {'更新时间':25} {'消息数':>5}  创建时间")
+    for row in rows:
+        print(
+            f"{row['id']:10} {row['updated_at']:25} "
+            f"{row['msg_count']:>5}  {row['created_at']}"
+        )
 
-    if args.list_sessions:
-        _print_session_list(store)
-        store.close()
+
+async def _ainput(prompt: str) -> str:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, input, prompt)
+
+
+async def _print_agent_stream(agent: Agent, session, user_input: str) -> None:
+    """消费 AgentEvent，并在 pending tool 完成后继续同一轮响应。"""
+    stream = agent.astream(session, user_input)
+    printed_header = False
+    printed_text = False
+
+    while True:
+        terminal_type = ""
+        terminal_content = ""
+        pending_task_ids: tuple[str, ...] = ()
+
+        async for event in stream:
+            if event.type == "model_text_delta" and event.payload.get("text"):
+                if not printed_header:
+                    print("\n🤖 Cathy >")
+                    printed_header = True
+                print(str(event.payload["text"]), end="", flush=True)
+                printed_text = True
+            elif event.type in {
+                "run_completed",
+                "run_pending",
+                "run_failed",
+                "run_cancelled",
+            }:
+                terminal_type = event.type
+                terminal_content = str(event.payload.get("content") or "")
+                pending_task_ids = tuple(event.payload.get("task_ids") or ())
+
+        if terminal_type == "run_pending" and pending_task_ids:
+            stream = agent.astream_task(session, pending_task_ids[0])
+            continue
+
+        if terminal_content and not printed_text:
+            if not printed_header:
+                print("\n🤖 Cathy >")
+                printed_header = True
+            print(terminal_content, end="")
+        if printed_header:
+            print()
         return
 
-    session = store.get_or_create(args.session)
-    is_new = len(session.messages) == 0
-    # 把会话上下文广播给支持 attach_session 的插件（shell_exec/file_ops 等）。
-    agent.tools.attach_session(session.id)
 
-    # === Hook: SessionStart（拿到 session 后立刻派发，可往 system prompt 注入上下文） ===
-    if hooks.has_hooks_for(SESSION_START):
-        decision = hooks.dispatch(
-            HookEvent(
-                type=SESSION_START,
-                session_id=session.id,
-                payload={"new": is_new, "msg_count": len(session.messages)},
-            )
-        )
-        if decision.inject_context:
-            agent.assembler.append_system_layer(
-                f"[hook:SessionStart]\n{decision.inject_context}"
-            )
-
-    print(BANNER)
-    descriptors = agent.tools.list_tools()
-    print(
-        f"模型: {agent.llm.model}  |  "
-        f"会话: {session.id}（{len(session.messages)} 条历史）  |  "
-        f"工具: {[d.name for d in descriptors]}"
-    )
-    print("提示: `python main.py --session", session.id, "` 可在新进程中续聊\n")
+async def _aclose_runtime(agent: Agent, store: AsyncSessionStore) -> None:
+    """按后台任务、插件、模型、Store 的顺序释放 Runtime。"""
+    loop = asyncio.get_running_loop()
+    try:
+        await agent.task_registry.shutdown(cancel=True)
+    except Exception as exc:
+        logger.warning("[shutdown][tasks] %s", exc)
 
     try:
+        if agent.event_sink is not None:
+            await agent.event_sink.aflush()
+    except Exception as exc:
+        logger.warning("[shutdown][journal] %s", exc)
+
+    try:
+        await loop.run_in_executor(None, agent.tools.shutdown)
+    except Exception as exc:
+        logger.warning("[shutdown][tools] %s", exc)
+
+    try:
+        model_aclose = getattr(agent.llm, "aclose", None)
+        if callable(model_aclose):
+            await model_aclose()
+        model_close = getattr(agent.llm, "close", None)
+        if callable(model_close):
+            await loop.run_in_executor(None, model_close)
+    except Exception as exc:
+        logger.warning("[shutdown][model] %s", exc)
+    finally:
+        await store.aclose()
+
+
+async def amain(argv: list[str] | None = None) -> None:
+    configure_logging()
+    args = _parse_args(argv)
+
+    if args.export_runs:
+        cfg = load_config()
+        export_store = await AsyncSessionStore.open(_resolve_db_path(cfg))
+        try:
+            count = await RawRunExporter(export_store).aexport_jsonl(args.export_runs)
+            print(f"已导出 {count} 条 root run 到 {args.export_runs}")
+        finally:
+            await export_store.aclose()
+        return
+
+    agent, store, hooks = await build_async_runtime()
+
+    try:
+        if args.list_sessions:
+            _print_session_rows(await store.alist_sessions())
+            return
+
+        session = await store.aget_or_create(args.session)
+        is_new = len(session.messages) == 0
+        # 把会话上下文广播给支持 attach_session 的插件（shell_exec/file_ops 等）。
+        agent.tools.attach_session(session.id)
+
+        # === Hook: SessionStart ===
+        if hooks.has_hooks_for(SESSION_START):
+            decision = await hooks.adispatch(
+                HookEvent(
+                    type=SESSION_START,
+                    session_id=session.id,
+                    payload={"new": is_new, "msg_count": len(session.messages)},
+                )
+            )
+            if decision.inject_context:
+                agent.assembler.append_system_layer(
+                    f"[hook:SessionStart]\n{decision.inject_context}"
+                )
+
+        print(BANNER)
+        descriptors = agent.tools.list_tools()
+        print(
+            f"模型: {agent.llm.model}  |  "
+            f"会话: {session.id}（{len(session.messages)} 条历史）  |  "
+            f"工具: {[d.name for d in descriptors]}"
+        )
+        print("提示: `python main.py --session", session.id, "` 可在新进程中续聊\n")
+
         while True:
             try:
-                user_input = input("\n你 > ").strip()
+                user_input = (await _ainput("\n你 > ")).strip()
             except (EOFError, KeyboardInterrupt):
                 print("\n再见！")
                 return
@@ -358,10 +488,23 @@ def main() -> None:
             if not user_input:
                 continue
 
-            reply, _trace = agent.run(session, user_input)
-            print(f"\n🤖 Cathy >\n{reply}")
+            try:
+                await _print_agent_stream(agent, session, user_input)
+            except asyncio.CancelledError:
+                print("\n[当前任务已取消]")
+                raise
+            except Exception as exc:
+                logger.exception("[cli] Agent 执行失败")
+                print(f"\n[执行失败] {type(exc).__name__}: {exc}")
     finally:
-        store.close()
+        await _aclose_runtime(agent, store)
+
+
+def main() -> None:
+    try:
+        asyncio.run(amain())
+    except KeyboardInterrupt:
+        print("\n再见！")
 
 
 if __name__ == "__main__":

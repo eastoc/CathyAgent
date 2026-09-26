@@ -5,6 +5,8 @@ Phase 3.5 起：execute() 返回前会触发 SubagentStop hook，可改写 final
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 from pathlib import Path
 from typing import Any
@@ -65,6 +67,47 @@ class SubagentToolPlugin(ToolPlugin):
 
         if self._hooks is not None and self._hooks.has_hooks_for(SUBAGENT_STOP):
             decision = self._hooks.dispatch(
+                HookEvent(
+                    type=SUBAGENT_STOP,
+                    session_id=self._session_id,
+                    matcher_target=self._subagent.name,
+                    payload={
+                        "subagent": self._subagent.name,
+                        "params": params,
+                        "final_answer": final,
+                    },
+                )
+            )
+            if decision.rewrite_final_answer is not None:
+                final = str(decision.rewrite_final_answer)
+            if decision.inject_context:
+                final = f"{final}\n\n[hook:SubagentStop] {decision.inject_context}"
+
+        if final != result.final_answer:
+            result = SubagentResult(
+                final_answer=final,
+                finished=result.finished,
+                status=result.status,
+                failure=result.failure,
+                trace=result.trace,
+            )
+        return json.dumps(result.to_dict(subagent=self._subagent.name), ensure_ascii=False)
+
+    async def aexecute(self, tool_name: str, params: dict[str, Any]) -> str:
+        """在线程池运行旧 Subagent，并原生异步派发 SubagentStop Hook。"""
+        if tool_name != self._subagent.name:
+            raise PluginError(
+                f"{self._subagent.name} 插件不支持的工具: {tool_name}"
+            )
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            functools.partial(self._subagent.run, params),
+        )
+        final = result.final_answer or f"[subagent:{self._subagent.name}] 子任务无输出"
+
+        if self._hooks is not None and self._hooks.has_hooks_for(SUBAGENT_STOP):
+            decision = await self._hooks.adispatch(
                 HookEvent(
                     type=SUBAGENT_STOP,
                     session_id=self._session_id,

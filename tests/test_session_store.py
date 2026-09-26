@@ -13,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from cathy.session.models import Message  # noqa: E402
-from cathy.session.store import SessionStore  # noqa: E402
+from cathy.session.store import AsyncSessionStore, SessionStore  # noqa: E402
 from cathy.contracts import (  # noqa: E402
     AttachmentRef,
     ImageBlock,
@@ -223,6 +223,32 @@ class SessionStoreTest(unittest.TestCase):
         self.assertEqual(loaded.result.text, "分析完成")
         self.assertEqual(loaded.result.metadata["frames"], 10)
         self.assertEqual([task.task_id for task in by_run], ["task-1"])
+
+
+class AsyncSessionStoreTest(unittest.IsolatedAsyncioTestCase):
+    async def test_async_store_roundtrip_and_ordered_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "async-sessions.db"
+            store = await AsyncSessionStore.open(db_path)
+            session = await store.acreate("async-session")
+
+            await store.aappend_message(
+                session.id,
+                Message(role="user", content=text_content("第一条")),
+            )
+            await store.aappend_message(
+                session.id,
+                Message(role="assistant", content=text_content("第二条")),
+            )
+            loaded = await store.aload(session.id)
+            rows = await store.alist_sessions()
+            await store.aclose()
+
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual([message.text for message in loaded.messages], ["第一条", "第二条"])
+        self.assertEqual(rows[0]["id"], "async-session")
+        self.assertEqual(rows[0]["msg_count"], 2)
 
 
 if __name__ == "__main__":

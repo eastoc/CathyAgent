@@ -432,6 +432,7 @@ def convert_response_input(
 
         content = _convert_message_content(
             message.get("content"),
+            role=role,
             attachment_resolver=attachment_resolver,
         )
         if content not in (None, "", []):
@@ -448,8 +449,12 @@ def convert_response_input(
 def _convert_message_content(
     content: Any,
     *,
+    role: str,
     attachment_resolver: AttachmentResolver | None = None,
 ) -> Any:
+    text_type = "output_text" if role == "assistant" else "input_text"
+    if isinstance(content, str):
+        return [{"type": text_type, "text": content}]
     if not isinstance(content, list):
         return content
 
@@ -458,9 +463,22 @@ def _convert_message_content(
         if not isinstance(part, Mapping):
             continue
         part_type = part.get("type")
-        if part_type in {"text", "input_text"}:
-            parts.append({"type": "input_text", "text": str(part.get("text") or "")})
+        if part_type in {"text", "input_text", "output_text"}:
+            parts.append(
+                {"type": text_type, "text": str(part.get("text") or "")}
+            )
+        elif part_type == "refusal":
+            if role != "assistant":
+                raise ValueError("refusal 内容只允许用于 assistant 历史消息")
+            parts.append(
+                {
+                    "type": "refusal",
+                    "refusal": str(part.get("refusal") or part.get("text") or ""),
+                }
+            )
         elif part_type == "image":
+            if role == "assistant":
+                raise ValueError("Responses API 不支持 assistant 历史中的 input_image")
             attachment = part.get("attachment")
             if not isinstance(attachment, Mapping):
                 raise ValueError("image content block 缺少 attachment")
@@ -476,6 +494,8 @@ def _convert_message_content(
                 converted_image["detail"] = str(part["detail"])
             parts.append(converted_image)
         elif part_type in {"image_url", "input_image"}:
+            if role == "assistant":
+                raise ValueError("Responses API 不支持 assistant 历史中的 input_image")
             image = part.get("image_url")
             image_url = image.get("url") if isinstance(image, Mapping) else image
             image_url = image_url or part.get("url")
@@ -496,11 +516,13 @@ def _convert_message_content(
             label = str(part.get("label") or "").strip()
             parts.append(
                 {
-                    "type": "input_text",
+                    "type": text_type,
                     "text": f"{label}: {body}" if label else body,
                 }
             )
         elif part_type in {"file", "input_file"}:
+            if role == "assistant":
+                raise ValueError("Responses API 不支持 assistant 历史中的 input_file")
             converted_file = {"type": "input_file"}
             attachment = part.get("attachment")
             if isinstance(attachment, Mapping):
@@ -515,6 +537,10 @@ def _convert_message_content(
                     converted_file[key] = part[key]
             parts.append(converted_file)
         else:
+            if role == "assistant":
+                raise ValueError(
+                    f"Responses API 不支持 assistant 内容类型: {part_type!r}"
+                )
             parts.append(dict(part))
     return parts
 

@@ -18,7 +18,7 @@ from cathy.plugins import TaskRegistry, ToolScheduler  # noqa: E402
 from cathy.plugins.base import ToolPlugin  # noqa: E402
 from cathy.plugins.manifest import Execution, PluginManifest, ToolSpec  # noqa: E402
 from cathy.plugins.registry import PluginRegistry, ToolView  # noqa: E402
-from cathy.session.store import SessionStore  # noqa: E402
+from cathy.session.store import AsyncSessionStore, SessionStore  # noqa: E402
 
 
 class _EchoPlugin(ToolPlugin):
@@ -252,6 +252,37 @@ class ToolSchedulerTest(unittest.IsolatedAsyncioTestCase):
 
 
 class TaskRegistryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_background_task_uses_async_store(self) -> None:
+        plugin = _ControlledAsyncPlugin()
+        scheduler = ToolScheduler(
+            _scheduler_registry(
+                plugin,
+                [_scheduler_spec("async_store", execution_mode="background")],
+            )
+        )
+        with tempfile.TemporaryDirectory() as td:
+            store = await AsyncSessionStore.open(Path(td) / "sessions.db")
+            session = await store.acreate("session-async-store")
+            registry = TaskRegistry(scheduler=scheduler, store=store)
+
+            queued = await registry.submit(
+                ToolInvocation("call-async", "async_store", {"delay": 0.01}),
+                run_id="run-async",
+                session_id=session.id,
+                provider_response_id="resp-async",
+                latest_response_id="resp-async",
+            )
+            completed = await registry.wait(queued.task_id)
+            turn_state, tool_message = await registry.abuild_model_continuation(
+                queued.task_id
+            )
+            await registry.shutdown()
+            await store.aclose()
+
+        self.assertEqual(completed.status, "succeeded")
+        self.assertEqual(turn_state.value, "resp-async")
+        self.assertEqual(tool_message["tool_call_id"], "call-async")
+
     async def test_background_task_persists_success_and_provider_call_id(self) -> None:
         plugin = _ControlledAsyncPlugin()
         scheduler = ToolScheduler(

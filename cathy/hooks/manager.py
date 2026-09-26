@@ -34,8 +34,10 @@ manager.dispatch(event) 的语义：
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -198,6 +200,7 @@ class HookManager:
             return HookSpec(
                 runner_type="python",
                 target=target,
+                timeout_sec=float(hk.get("timeout") or 5),
                 name=str(hk.get("name") or "") or target,
             )
         cmd = str(hk.get("command") or "").strip()
@@ -233,6 +236,50 @@ class HookManager:
                             "event": event.type,
                             "hook": inv.spec_name,
                             "error": error.splitlines()[-1] if error else "",
+                            "latency_ms": inv.latency_ms,
+                        }
+                    )
+                decisions.append(decision)
+                if decision.block:
+                    self.last_invocations = invocations
+                    return merge_decisions(decisions)
+
+        self.last_invocations = invocations
+        return merge_decisions(decisions)
+
+    async def adispatch(self, event: HookEvent) -> HookDecision:
+        """原生异步派发；保持配置顺序、decision 合并和 block 短路语义。"""
+        groups = self._groups.get(event.type) or []
+        invocations: list[RunnerInvocation] = []
+        decisions: list[HookDecision] = []
+
+        for group in groups:
+            if not group.matches(event.matcher_target or ""):
+                continue
+            for spec, runner in zip(group.specs, group.runners):
+                started_ms = int(time.time() * 1000)
+                try:
+                    if isinstance(runner, CommandRunner):
+                        # CommandRunner 自己负责 kill/回收超时子进程。
+                        decision, error = await runner.arun(event)
+                    else:
+                        decision, error = await asyncio.wait_for(
+                            runner.arun(event),
+                            timeout=max(0.1, float(spec.timeout_sec)),
+                        )
+                except asyncio.TimeoutError:
+                    decision = HookDecision.noop()
+                    error = f"hook 超时 ({spec.timeout_sec}s): {spec.display_name()}"
+
+                inv = RunnerInvocation.from_run(spec, decision, error, started_ms)
+                invocations.append(inv)
+                if error:
+                    self._log(
+                        {
+                            "phase": "exec",
+                            "event": event.type,
+                            "hook": inv.spec_name,
+                            "error": error.splitlines()[-1],
                             "latency_ms": inv.latency_ms,
                         }
                     )

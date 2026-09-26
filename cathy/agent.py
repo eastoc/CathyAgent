@@ -8,7 +8,6 @@ continuation。arun()/aresume_task() 收集事件，run()/run_request() 仅保�
 from __future__ import annotations
 
 import asyncio
-import functools
 import time
 import weakref
 from dataclasses import dataclass, field
@@ -19,10 +18,12 @@ from .contracts import (
     AgentRequest,
     AgentResult,
     AttachmentResolver,
+    EventSink,
     ModelClient,
     ModelToolCall,
     ModelTurnState,
     RunContext,
+    RunRecord,
     ToolInvocation,
     ToolResult,
 )
@@ -40,7 +41,7 @@ from .llm_errors import LLMCallError
 from .model_clients.invoke import astream_model_response
 from .plugins import PluginRegistry, TaskRegistry, ToolScheduler
 from .session.models import Message, Session
-from .session.store import SessionStore
+from .session.store import AsyncSessionStore, SessionStore
 
 
 @dataclass
@@ -96,7 +97,7 @@ class Agent:
         llm: ModelClient,
         tools: PluginRegistry,
         assembler: ContextAssembler,
-        store: SessionStore,
+        store: SessionStore | AsyncSessionStore,
         config: AgentConfig | None = None,
         on_event: Callable[[str, dict], None] | None = None,
         hooks: HookManager | None = None,
@@ -104,6 +105,7 @@ class Agent:
         attachment_resolver: AttachmentResolver | None = None,
         tool_scheduler: ToolScheduler | None = None,
         task_registry: TaskRegistry | None = None,
+        event_sink: EventSink | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -119,6 +121,7 @@ class Agent:
             scheduler=self.tool_scheduler,
             store=store,
         )
+        self.event_sink = event_sink
         # asyncio 原语绑定事件循环。按 loop 保存锁，支持同步兼容层每次创建新 loop。
         self._session_locks: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
@@ -233,7 +236,11 @@ class Agent:
         return AgentResult(
             content=str(terminal.payload.get("content") or ""),
             run_id=terminal.run_id,
-            status=terminal.type.removeprefix("run_"),
+            status=(
+                terminal.type[len("run_") :]
+                if terminal.type.startswith("run_")
+                else terminal.type
+            ),
             pending_task_ids=tuple(terminal.payload.get("task_ids") or ()),
             trace=trace,
         )
@@ -247,9 +254,7 @@ class Agent:
     ) -> AsyncIterator[AgentEvent]:
         """流式等待一个 pending task，并把结果送回对应的模型轮次。"""
 
-        run_context = context or RunContext()
-        factory = _EventFactory(run_id=run_context.run_id, session_id=session.id)
-        initial = self.task_registry.get(task_id)
+        initial = await self.task_registry.aget(task_id)
         if initial is None:
             raise KeyError(f"工具任务不存在: {task_id}")
         if initial.session_id != session.id:
@@ -257,7 +262,34 @@ class Agent:
         if initial.metadata.get("continuation_delivered"):
             raise RuntimeError(f"工具任务结果已经续传: {task_id}")
 
-        yield factory.create(
+        supplied_context = context or RunContext()
+        run_context = RunContext(
+            run_id=supplied_context.run_id,
+            root_run_id=(
+                supplied_context.root_run_id
+                or str(initial.metadata.get("root_run_id") or initial.run_id)
+            ),
+            parent_run_id=supplied_context.parent_run_id or initial.run_id,
+            episode_id=supplied_context.episode_id,
+            env_idx=supplied_context.env_idx,
+            metadata=supplied_context.metadata,
+        )
+        factory = _EventFactory(run_id=run_context.run_id, session_id=session.id)
+        await self._astart_recording(run_context, session.id)
+
+        event = factory.create(
+            "run_started",
+            {
+                "episode_id": run_context.episode_id,
+                "env_idx": run_context.env_idx,
+                "metadata": dict(run_context.metadata),
+                "continuation": True,
+                "parent_run_id": run_context.parent_run_id,
+            },
+        )
+        await self._arecord_event(event)
+        yield event
+        event = factory.create(
             f"tool_task_{initial.status}",
             {
                 "task_id": task_id,
@@ -266,8 +298,10 @@ class Agent:
                 "status": initial.status,
             },
         )
+        await self._arecord_event(event)
+        yield event
         record = await self.task_registry.wait(task_id)
-        yield factory.create(
+        event = factory.create(
             f"tool_task_{record.status}",
             {
                 "task_id": task_id,
@@ -276,11 +310,15 @@ class Agent:
                 "status": record.status,
             },
         )
-        turn_state, tool_message = self.task_registry.build_model_continuation(task_id)
+        await self._arecord_event(event)
+        yield event
+        turn_state, tool_message = await self.task_registry.abuild_model_continuation(
+            task_id
+        )
         pending_group_id = str(
             record.metadata.get("pending_group_id") or record.run_id
         )
-        siblings = self.task_registry.list(session_id=record.session_id)
+        siblings = await self.task_registry.alist(session_id=record.session_id)
         remaining_task_ids = [
             sibling.task_id
             for sibling in siblings
@@ -306,6 +344,7 @@ class Agent:
                 ):
                     if event.type.startswith("run_"):
                         terminal_type = event.type
+                    await self._arecord_event(event)
                     self._notify_legacy(event)
                     yield event
             except asyncio.CancelledError:
@@ -313,6 +352,7 @@ class Agent:
                     "run_cancelled",
                     {"content": "", "reason": "cancelled"},
                 )
+                await self._arecord_event(event)
                 self._notify_legacy(event)
                 yield event
                 raise
@@ -326,12 +366,13 @@ class Agent:
                         "message": str(exc),
                     },
                 )
+                await self._arecord_event(event)
                 self._notify_legacy(event)
                 yield event
                 raise
 
         if terminal_type in {"run_completed", "run_pending"}:
-            self.task_registry.update_metadata(
+            await self.task_registry.aupdate_metadata(
                 task_id,
                 continuation_delivered=True,
                 continuation_run_id=run_context.run_id,
@@ -350,6 +391,7 @@ class Agent:
         )
         run_context = context or RunContext()
         factory = _EventFactory(run_id=run_context.run_id, session_id=session.id)
+        await self._astart_recording(run_context, session.id)
         lock = self._get_session_lock(session.id)
 
         async with lock:
@@ -360,6 +402,7 @@ class Agent:
                     run_context,
                     factory,
                 ):
+                    await self._arecord_event(event)
                     self._notify_legacy(event)
                     yield event
             except asyncio.CancelledError:
@@ -367,6 +410,7 @@ class Agent:
                     "run_cancelled",
                     {"content": "", "reason": "cancelled"},
                 )
+                await self._arecord_event(event)
                 self._notify_legacy(event)
                 yield event
                 raise
@@ -380,6 +424,7 @@ class Agent:
                         "message": str(exc),
                     },
                 )
+                await self._arecord_event(event)
                 self._notify_legacy(event)
                 yield event
                 raise
@@ -426,6 +471,14 @@ class Agent:
                     request = request.with_text(user_input)
                 if decision.inject_context:
                     injected_after_user.append(decision.inject_context)
+                yield factory.create(
+                    "request_submitted",
+                    {
+                        "content": serialize_content_blocks(request.content),
+                        "attachment_ids": list(request.attachment_ids),
+                        "metadata": dict(request.metadata),
+                    },
+                )
                 if decision.block:
                     reason = decision.block_reason or "[hook:UserPromptSubmit] 已阻断"
                     user_msg = Message(
@@ -433,9 +486,9 @@ class Agent:
                         content=request.content,
                         metadata=dict(request.metadata),
                     )
-                    self._persist_message(session, user_msg)
+                    await self._apersist_message(session, user_msg)
                     blocked_msg = Message(role="assistant", content=text_content(reason))
-                    self._persist_message(session, blocked_msg)
+                    await self._apersist_message(session, blocked_msg)
                     yield factory.create(
                         "hook_blocked",
                         {"event": USER_PROMPT_SUBMIT, "reason": reason},
@@ -443,14 +496,24 @@ class Agent:
                     yield factory.create("run_completed", {"content": reason})
                     return
 
+            else:
+                yield factory.create(
+                    "request_submitted",
+                    {
+                        "content": serialize_content_blocks(request.content),
+                        "attachment_ids": list(request.attachment_ids),
+                        "metadata": dict(request.metadata),
+                    },
+                )
+
             user_msg = Message(
                 role="user",
                 content=request.content,
                 metadata=dict(request.metadata),
             )
-            self._persist_message(session, user_msg)
+            await self._apersist_message(session, user_msg)
 
-            messages = self.assembler.assemble(session)
+            messages = await self.assembler.aassemble(session)
             for injected in injected_after_user:
                 messages.append(
                     {
@@ -465,7 +528,7 @@ class Agent:
             active_pending_ids = []
         else:
             turn_state, delta_messages, active_pending_ids = continuation
-            messages = self.assembler.assemble(session)
+            messages = await self.assembler.aassemble(session)
             yield factory.create(
                 "continuation_started",
                 {
@@ -477,7 +540,7 @@ class Agent:
         model_tools = self.tools.model_tools() or None
         pending_group_id = factory.run_id
         if active_pending_ids:
-            first_pending = self.task_registry.get(active_pending_ids[0])
+            first_pending = await self.task_registry.aget(active_pending_ids[0])
             if first_pending is not None:
                 pending_group_id = str(
                     first_pending.metadata.get("pending_group_id")
@@ -547,7 +610,7 @@ class Agent:
                     raise RuntimeError("模型事件流结束但没有完整 response")
             except LLMCallError as exc:
                 content = _llm_error_message(exc)
-                self._persist_message(
+                await self._apersist_message(
                     session,
                     Message(role="assistant", content=text_content(content)),
                 )
@@ -578,7 +641,7 @@ class Agent:
             if response.next_turn_state is not None:
                 latest_response_id = str(response.next_turn_state.value)
                 for task_id in active_pending_ids:
-                    self.task_registry.update_latest_response_id(
+                    await self.task_registry.aupdate_latest_response_id(
                         task_id,
                         latest_response_id,
                     )
@@ -586,7 +649,7 @@ class Agent:
             if not response.tool_calls:
                 content = (response.text or "").strip()
                 if active_pending_ids:
-                    self._persist_message(
+                    await self._apersist_message(
                         session,
                         Message(role="assistant", content=text_content(content)),
                     )
@@ -632,7 +695,7 @@ class Agent:
                         )
                         continue
 
-                self._persist_message(
+                await self._apersist_message(
                     session,
                     Message(role="assistant", content=text_content(content)),
                 )
@@ -648,7 +711,7 @@ class Agent:
                 tool_calls=_model_tool_calls_to_dicts(response.tool_calls),
                 reasoning=response.reasoning,
             )
-            self._persist_message(session, assistant_msg)
+            await self._apersist_message(session, assistant_msg)
             messages.append(assistant_msg.to_model_dict())
 
             tool_result_messages: list[dict[str, Any]] = []
@@ -794,6 +857,7 @@ class Agent:
                         "step": step,
                         "output_index": index,
                         "pending_group_id": pending_group_id,
+                        "root_run_id": context.root_run_id or context.run_id,
                     },
                 )
                 active_pending_ids.append(queued.task_id)
@@ -816,7 +880,7 @@ class Agent:
                 outcome = outcomes[index]
                 if isinstance(outcome, str):
                     result = outcome
-                    tool_message = self._persist_tool_result(
+                    tool_message = await self._apersist_tool_result(
                         session,
                         call_id=tc.id,
                         name=name,
@@ -865,7 +929,7 @@ class Agent:
                         "metadata": dict(tool_result.metadata),
                     },
                 )
-                tool_message = self._persist_tool_result(
+                tool_message = await self._apersist_tool_result(
                     session,
                     call_id=tc.id,
                     name=name,
@@ -912,22 +976,50 @@ class Agent:
             locks[session_id] = lock
         return lock
 
+    async def _astart_recording(
+        self,
+        context: RunContext,
+        session_id: str,
+    ) -> None:
+        if self.event_sink is None:
+            return
+        await self.event_sink.astart_run(
+            RunRecord(
+                run_id=context.run_id,
+                root_run_id=context.root_run_id or context.run_id,
+                parent_run_id=context.parent_run_id,
+                session_id=session_id,
+                episode_id=context.episode_id,
+                model_metadata={
+                    "client": type(self.llm).__name__,
+                    "model": getattr(self.llm, "model", None),
+                },
+                context={
+                    "env_idx": context.env_idx,
+                    "metadata": dict(context.metadata),
+                },
+            )
+        )
+
+    async def _arecord_event(self, event: AgentEvent) -> None:
+        if self.event_sink is not None:
+            await self.event_sink.aappend_event(event)
+
     async def _adispatch(self, event_type: str, **kwargs: Any):
         if self.hooks is None or not self.hooks.has_hooks_for(event_type):
             return None
-        loop = asyncio.get_running_loop()
-        call = functools.partial(
-            self.hooks.dispatch,
-            HookEvent(type=event_type, **kwargs),
-        )
-        return await loop.run_in_executor(None, call)
+        return await self.hooks.adispatch(HookEvent(type=event_type, **kwargs))
 
-    def _persist_message(self, session: Session, message: Message) -> None:
-        # SQLite Store 仍是同步边界；下一阶段会改为单 writer queue。
-        self.store.append_message(session.id, message)
+    async def _apersist_message(self, session: Session, message: Message) -> None:
+        append = getattr(self.store, "aappend_message", None)
+        if callable(append):
+            await append(session.id, message)
+        else:
+            # 同步 Store 仅作为旧调用方和测试兼容路径。
+            self.store.append_message(session.id, message)
         session.append(message)
 
-    def _persist_tool_result(
+    async def _apersist_tool_result(
         self,
         session: Session,
         *,
@@ -941,7 +1033,7 @@ class Agent:
             tool_call_id=call_id,
             name=name,
         )
-        self._persist_message(session, tool_msg)
+        await self._apersist_message(session, tool_msg)
         return tool_msg.to_model_dict()
 
     def _notify_legacy(self, event: AgentEvent) -> None:

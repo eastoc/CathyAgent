@@ -355,6 +355,44 @@ class OpenAIResponsesClientTest(unittest.TestCase):
         self.assertEqual(items[0]["content"][1]["type"], "input_image")
         self.assertEqual(items[0]["content"][1]["detail"], "high")
 
+    def test_converts_assistant_history_to_output_text(self) -> None:
+        items = convert_response_input(
+            [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "任务完成"}],
+                }
+            ]
+        )
+
+        self.assertEqual(
+            items,
+            [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "任务完成"}],
+                }
+            ],
+        )
+
+    def test_converts_multiturn_text_by_message_role(self) -> None:
+        items = convert_response_input(
+            [
+                {"role": "system", "content": [{"type": "text", "text": "规则"}]},
+                {"role": "user", "content": [{"type": "text", "text": "第一问"}]},
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "第一答"}],
+                },
+                {"role": "user", "content": [{"type": "text", "text": "第二问"}]},
+            ]
+        )
+
+        self.assertEqual(
+            [item["content"][0]["type"] for item in items],
+            ["input_text", "input_text", "output_text", "input_text"],
+        )
+
     def test_converts_neutral_image_attachment(self) -> None:
         import tempfile
 

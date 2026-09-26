@@ -197,6 +197,21 @@ class ContextAssembler:
             msgs.append({"role": "user", "content": text_model_content(user_input)})
         return msgs
 
+    async def aassemble(
+        self,
+        session: "Session",
+        user_input: str | None = None,
+    ) -> list[dict]:
+        """异步装配上下文；PreCompact Hook 通过 adispatch 执行。"""
+        msgs: list[dict] = [
+            {"role": "system", "content": text_model_content(self.system_prompt)}
+        ]
+        history = await self._afit_to_budget(session.messages)
+        msgs.extend(message.to_model_dict() for message in history)
+        if user_input is not None and user_input != "":
+            msgs.append({"role": "user", "content": text_model_content(user_input)})
+        return msgs
+
     def _fit_to_budget(self, msgs: list["Message"]) -> list["Message"]:
         if not msgs:
             return []
@@ -225,6 +240,37 @@ class ContextAssembler:
                 # PreCompact 仅观测性质，永不影响主流程
                 pass
 
+        return self._trim_to_budget(msgs)
+
+    async def _afit_to_budget(self, msgs: list["Message"]) -> list["Message"]:
+        if not msgs:
+            return []
+
+        total_tokens = sum(self._msg_tokens(message) for message in msgs)
+        if total_tokens <= self.token_budget:
+            return list(msgs)
+
+        if self.hooks is not None:
+            try:
+                from .hooks import HookEvent, PRE_COMPACT
+
+                if self.hooks.has_hooks_for(PRE_COMPACT):
+                    await self.hooks.adispatch(
+                        HookEvent(
+                            type=PRE_COMPACT,
+                            payload={
+                                "total_tokens": total_tokens,
+                                "budget": self.token_budget,
+                                "msg_count": len(msgs),
+                            },
+                        )
+                    )
+            except Exception:
+                pass
+
+        return self._trim_to_budget(msgs)
+
+    def _trim_to_budget(self, msgs: list["Message"]) -> list["Message"]:
         # 找所有 user 消息位置作为合法切分点
         user_indices = [i for i, m in enumerate(msgs) if m.role == "user"]
         if not user_indices:
