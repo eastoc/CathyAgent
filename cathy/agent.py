@@ -1,8 +1,8 @@
 """Session-aware 的异步 ReAct Agent 主循环。
 
-astream() 是唯一真实执行入口；arun() 负责收集结果，run()/run_request()
-仅保留为同步兼容层。当前阶段保持工具串行执行，后续在 ToolExecutionPolicy
-就绪后再按资源键引入受控并发。
+astream() 是普通请求的真实执行入口；astream_task() 负责后台工具完成后的
+continuation。arun()/aresume_task() 收集事件，run()/run_request() 仅保留为
+同步兼容层。工具通过 ToolExecutionPolicy 做受控并发与后台调度。
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from .contracts import (
     AttachmentResolver,
     ModelClient,
     ModelToolCall,
+    ModelTurnState,
     RunContext,
     ToolInvocation,
     ToolResult,
@@ -36,8 +37,8 @@ from .hooks import (
     USER_PROMPT_SUBMIT,
 )
 from .llm_errors import LLMCallError
-from .model_clients.invoke import agenerate_model_response
-from .plugins import PluginRegistry, ToolScheduler
+from .model_clients.invoke import astream_model_response
+from .plugins import PluginRegistry, TaskRegistry, ToolScheduler
 from .session.models import Message, Session
 from .session.store import SessionStore
 
@@ -102,6 +103,7 @@ class Agent:
         permission_cfg: dict[str, Any] | None = None,
         attachment_resolver: AttachmentResolver | None = None,
         tool_scheduler: ToolScheduler | None = None,
+        task_registry: TaskRegistry | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -113,6 +115,10 @@ class Agent:
         self.permission_cfg = permission_cfg or {}
         self.attachment_resolver = attachment_resolver
         self.tool_scheduler = tool_scheduler or ToolScheduler(tools)
+        self.task_registry = task_registry or TaskRegistry(
+            scheduler=self.tool_scheduler,
+            store=store,
+        )
         # asyncio 原语绑定事件循环。按 loop 保存锁，支持同步兼容层每次创建新 loop。
         self._session_locks: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
@@ -129,9 +135,23 @@ class Agent:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            result = asyncio.run(self.arun(session, request))
+            result = asyncio.run(self._arun_sync_compatible(session, request))
             return result.content, result.trace
         raise RuntimeError("当前线程已有事件循环，请使用 await agent.arun(...)")
+
+    async def _arun_sync_compatible(
+        self,
+        session: Session,
+        request: AgentRequest,
+    ) -> AgentResult:
+        """同步入口无法保留事件循环，因此阻塞收敛所有 pending task。"""
+
+        result = await self.arun(session, request)
+        while result.status == "pending":
+            if not result.pending_task_ids:
+                raise RuntimeError("run_pending 缺少 task_ids")
+            result = await self.aresume_task(session, result.pending_task_ids[0])
+        return result
 
     # ---------------- 异步公开入口 ---------------- #
 
@@ -152,13 +172,20 @@ class Agent:
             "llm_error": "llm_error",
             "run_completed": "final",
             "max_steps": "max_steps",
+            "tool_task_queued": "tool_task_queued",
+            "run_pending": "pending",
         }
 
         async for event in self.astream(session, request, context=context):
             trace_type = trace_type_map.get(event.type)
             if trace_type is not None:
                 trace.add(trace_type, dict(event.payload))
-            if event.type in {"run_completed", "run_failed", "run_cancelled"}:
+            if event.type in {
+                "run_completed",
+                "run_pending",
+                "run_failed",
+                "run_cancelled",
+            }:
                 terminal = event
 
         if terminal is None:
@@ -172,8 +199,143 @@ class Agent:
             content=str(terminal.payload.get("content") or ""),
             run_id=terminal.run_id,
             status=status,
+            pending_task_ids=tuple(terminal.payload.get("task_ids") or ()),
             trace=trace,
         )
+
+    async def aresume_task(
+        self,
+        session: Session,
+        task_id: str,
+        *,
+        context: RunContext | None = None,
+    ) -> AgentResult:
+        """等待后台工具结束，并使用原始 call_id/response_id 续跑模型。"""
+
+        trace = AgentTrace()
+        terminal: AgentEvent | None = None
+        async for event in self.astream_task(
+            session,
+            task_id,
+            context=context,
+        ):
+            if event.type.startswith("tool_") or event.type.startswith("continuation_"):
+                trace.add(event.type, dict(event.payload))
+            if event.type in {
+                "run_completed",
+                "run_pending",
+                "run_failed",
+                "run_cancelled",
+            }:
+                terminal = event
+        if terminal is None:
+            raise RuntimeError("continuation 事件流结束但没有终止事件")
+        return AgentResult(
+            content=str(terminal.payload.get("content") or ""),
+            run_id=terminal.run_id,
+            status=terminal.type.removeprefix("run_"),
+            pending_task_ids=tuple(terminal.payload.get("task_ids") or ()),
+            trace=trace,
+        )
+
+    async def astream_task(
+        self,
+        session: Session,
+        task_id: str,
+        *,
+        context: RunContext | None = None,
+    ) -> AsyncIterator[AgentEvent]:
+        """流式等待一个 pending task，并把结果送回对应的模型轮次。"""
+
+        run_context = context or RunContext()
+        factory = _EventFactory(run_id=run_context.run_id, session_id=session.id)
+        initial = self.task_registry.get(task_id)
+        if initial is None:
+            raise KeyError(f"工具任务不存在: {task_id}")
+        if initial.session_id != session.id:
+            raise ValueError("工具任务不属于当前 session")
+        if initial.metadata.get("continuation_delivered"):
+            raise RuntimeError(f"工具任务结果已经续传: {task_id}")
+
+        yield factory.create(
+            f"tool_task_{initial.status}",
+            {
+                "task_id": task_id,
+                "call_id": initial.provider_call_id,
+                "name": initial.invocation.name,
+                "status": initial.status,
+            },
+        )
+        record = await self.task_registry.wait(task_id)
+        yield factory.create(
+            f"tool_task_{record.status}",
+            {
+                "task_id": task_id,
+                "call_id": record.provider_call_id,
+                "name": record.invocation.name,
+                "status": record.status,
+            },
+        )
+        turn_state, tool_message = self.task_registry.build_model_continuation(task_id)
+        pending_group_id = str(
+            record.metadata.get("pending_group_id") or record.run_id
+        )
+        siblings = self.task_registry.list(session_id=record.session_id)
+        remaining_task_ids = [
+            sibling.task_id
+            for sibling in siblings
+            if sibling.task_id != task_id
+            and sibling.status != "orphaned"
+            and not sibling.metadata.get("continuation_delivered")
+            and str(
+                sibling.metadata.get("pending_group_id") or sibling.run_id
+            )
+            == pending_group_id
+        ]
+
+        terminal_type: str | None = None
+        lock = self._get_session_lock(session.id)
+        async with lock:
+            try:
+                async for event in self._astream_locked(
+                    session,
+                    None,
+                    run_context,
+                    factory,
+                    continuation=(turn_state, [tool_message], remaining_task_ids),
+                ):
+                    if event.type.startswith("run_"):
+                        terminal_type = event.type
+                    self._notify_legacy(event)
+                    yield event
+            except asyncio.CancelledError:
+                event = factory.create(
+                    "run_cancelled",
+                    {"content": "", "reason": "cancelled"},
+                )
+                self._notify_legacy(event)
+                yield event
+                raise
+            except Exception as exc:
+                event = factory.create(
+                    "run_failed",
+                    {
+                        "content": "",
+                        "reason": "continuation_error",
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                )
+                self._notify_legacy(event)
+                yield event
+                raise
+
+        if terminal_type in {"run_completed", "run_pending"}:
+            self.task_registry.update_metadata(
+                task_id,
+                continuation_delivered=True,
+                continuation_run_id=run_context.run_id,
+            )
 
     async def astream(
         self,
@@ -227,80 +389,106 @@ class Agent:
     async def _astream_locked(
         self,
         session: Session,
-        request: AgentRequest,
+        request: AgentRequest | None,
         context: RunContext,
         factory: _EventFactory,
+        *,
+        continuation: tuple[ModelTurnState, list[dict[str, Any]], list[str]] | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        yield factory.create(
-            "run_started",
-            {
-                "episode_id": context.episode_id,
-                "env_idx": context.env_idx,
-                "metadata": dict(context.metadata),
-            },
-        )
-
-        user_input = request.text
-        injected_after_user: list[str] = []
-        decision = await self._adispatch(
-            USER_PROMPT_SUBMIT,
-            session_id=session.id,
-            payload={
-                "user_input": user_input,
-                "content": serialize_content_blocks(request.content),
-                "attachment_ids": list(request.attachment_ids),
-                "metadata": dict(request.metadata),
-            },
-        )
-        if decision is not None:
-            if decision.rewrite_user_input is not None:
-                user_input = str(decision.rewrite_user_input)
-                request = request.with_text(user_input)
-            if decision.inject_context:
-                injected_after_user.append(decision.inject_context)
-            if decision.block:
-                reason = decision.block_reason or "[hook:UserPromptSubmit] 已阻断"
-                user_msg = Message(
-                    role="user",
-                    content=request.content,
-                    metadata=dict(request.metadata),
-                )
-                self._persist_message(session, user_msg)
-                blocked_msg = Message(role="assistant", content=text_content(reason))
-                self._persist_message(session, blocked_msg)
-                yield factory.create(
-                    "hook_blocked",
-                    {"event": USER_PROMPT_SUBMIT, "reason": reason},
-                )
-                yield factory.create("run_completed", {"content": reason})
-                return
-
-        user_msg = Message(
-            role="user",
-            content=request.content,
-            metadata=dict(request.metadata),
-        )
-        self._persist_message(session, user_msg)
-
-        messages = self.assembler.assemble(session)
-        for injected in injected_after_user:
-            messages.append(
+        active_pending_ids: list[str]
+        if continuation is None:
+            if request is None:
+                raise ValueError("普通运行缺少 AgentRequest")
+            yield factory.create(
+                "run_started",
                 {
-                    "role": "system",
-                    "content": text_model_content(
-                        f"[hook:UserPromptSubmit] {injected}"
-                    ),
-                }
+                    "episode_id": context.episode_id,
+                    "env_idx": context.env_idx,
+                    "metadata": dict(context.metadata),
+                },
+            )
+
+            user_input = request.text
+            injected_after_user: list[str] = []
+            decision = await self._adispatch(
+                USER_PROMPT_SUBMIT,
+                session_id=session.id,
+                payload={
+                    "user_input": user_input,
+                    "content": serialize_content_blocks(request.content),
+                    "attachment_ids": list(request.attachment_ids),
+                    "metadata": dict(request.metadata),
+                },
+            )
+            if decision is not None:
+                if decision.rewrite_user_input is not None:
+                    user_input = str(decision.rewrite_user_input)
+                    request = request.with_text(user_input)
+                if decision.inject_context:
+                    injected_after_user.append(decision.inject_context)
+                if decision.block:
+                    reason = decision.block_reason or "[hook:UserPromptSubmit] 已阻断"
+                    user_msg = Message(
+                        role="user",
+                        content=request.content,
+                        metadata=dict(request.metadata),
+                    )
+                    self._persist_message(session, user_msg)
+                    blocked_msg = Message(role="assistant", content=text_content(reason))
+                    self._persist_message(session, blocked_msg)
+                    yield factory.create(
+                        "hook_blocked",
+                        {"event": USER_PROMPT_SUBMIT, "reason": reason},
+                    )
+                    yield factory.create("run_completed", {"content": reason})
+                    return
+
+            user_msg = Message(
+                role="user",
+                content=request.content,
+                metadata=dict(request.metadata),
+            )
+            self._persist_message(session, user_msg)
+
+            messages = self.assembler.assemble(session)
+            for injected in injected_after_user:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": text_model_content(
+                            f"[hook:UserPromptSubmit] {injected}"
+                        ),
+                    }
+                )
+            turn_state = None
+            delta_messages: list[dict[str, Any]] | None = None
+            active_pending_ids = []
+        else:
+            turn_state, delta_messages, active_pending_ids = continuation
+            messages = self.assembler.assemble(session)
+            yield factory.create(
+                "continuation_started",
+                {
+                    "previous_response_id": str(turn_state.value),
+                    "pending_task_ids": list(active_pending_ids),
+                },
             )
 
         model_tools = self.tools.model_tools() or None
-        turn_state = None
-        delta_messages: list[dict[str, Any]] | None = None
+        pending_group_id = factory.run_id
+        if active_pending_ids:
+            first_pending = self.task_registry.get(active_pending_ids[0])
+            if first_pending is not None:
+                pending_group_id = str(
+                    first_pending.metadata.get("pending_group_id")
+                    or first_pending.run_id
+                )
 
         for step in range(self.config.max_steps):
             yield factory.create("model_started", {"step": step})
             try:
-                response = await agenerate_model_response(
+                response = None
+                async for model_event in astream_model_response(
                     self.llm,
                     messages,
                     tools=model_tools,
@@ -308,7 +496,55 @@ class Agent:
                     turn_state=turn_state,
                     delta_messages=delta_messages,
                     attachment_resolver=self.attachment_resolver,
-                )
+                ):
+                    if model_event.type == "text_delta":
+                        yield factory.create(
+                            "model_text_delta",
+                            {"step": step, "text": model_event.text},
+                        )
+                    elif model_event.type == "reasoning_delta":
+                        yield factory.create(
+                            "model_reasoning_delta",
+                            {"step": step, "text": model_event.text},
+                        )
+                    elif model_event.type == "tool_call_started":
+                        yield factory.create(
+                            "model_tool_call_started",
+                            {"step": step, **dict(model_event.metadata)},
+                        )
+                    elif model_event.type == "tool_call_delta":
+                        yield factory.create(
+                            "model_tool_call_delta",
+                            {
+                                "step": step,
+                                "delta": model_event.text,
+                                **dict(model_event.metadata),
+                            },
+                        )
+                    elif model_event.type == "tool_call_completed":
+                        tool_call = model_event.metadata.get("tool_call")
+                        payload = {
+                            "step": step,
+                            "item_id": model_event.metadata.get("item_id"),
+                            "output_index": model_event.metadata.get("output_index"),
+                        }
+                        if isinstance(tool_call, ModelToolCall):
+                            payload.update(
+                                {
+                                    "call_id": tool_call.id,
+                                    "name": tool_call.name,
+                                    "arguments": dict(tool_call.arguments),
+                                    "async_execution": tool_call.async_execution,
+                                }
+                            )
+                        yield factory.create("model_tool_call_completed", payload)
+                    elif model_event.type in {
+                        "response_completed",
+                        "response_incomplete",
+                    }:
+                        response = model_event.response
+                if response is None:
+                    raise RuntimeError("模型事件流结束但没有完整 response")
             except LLMCallError as exc:
                 content = _llm_error_message(exc)
                 self._persist_message(
@@ -339,8 +575,30 @@ class Agent:
                 },
             )
 
+            if response.next_turn_state is not None:
+                latest_response_id = str(response.next_turn_state.value)
+                for task_id in active_pending_ids:
+                    self.task_registry.update_latest_response_id(
+                        task_id,
+                        latest_response_id,
+                    )
+
             if not response.tool_calls:
                 content = (response.text or "").strip()
+                if active_pending_ids:
+                    self._persist_message(
+                        session,
+                        Message(role="assistant", content=text_content(content)),
+                    )
+                    yield factory.create(
+                        "run_pending",
+                        {
+                            "content": content,
+                            "step": step,
+                            "task_ids": list(active_pending_ids),
+                        },
+                    )
+                    return
                 stop_decision = await self._adispatch(
                     STOP,
                     session_id=session.id,
@@ -395,6 +653,10 @@ class Agent:
 
             tool_result_messages: list[dict[str, Any]] = []
             prepared: list[tuple[int, ModelToolCall, str, dict[str, Any]]] = []
+            background_prepared: list[
+                tuple[int, ModelToolCall, str, dict[str, Any]]
+            ] = []
+            background_indices: set[int] = set()
             outcomes: dict[int, str | ToolResult] = {}
             effective_args: dict[int, dict[str, Any]] = {}
 
@@ -408,6 +670,14 @@ class Agent:
                 if callable(get_desc):
                     desc = get_desc(name)
                 trust_level = getattr(desc, "trust_level", "untrusted")
+                policy = self.tool_scheduler.get_policy(name)
+                if tc.async_execution and policy.mode != "background":
+                    outcomes[index] = (
+                        f"[ToolError:{name}][ASYNC_NOT_ALLOWED] "
+                        "模型请求异步执行，但工具未声明 execution_mode=background"
+                    )
+                    effective_args[index] = args
+                    continue
 
                 interaction_mode = "non_interactive"
                 try:
@@ -475,7 +745,11 @@ class Agent:
                         "args": args,
                     },
                 )
-                prepared.append((index, tc, name, args))
+                if policy.mode == "background":
+                    background_prepared.append((index, tc, name, args))
+                    background_indices.add(index)
+                else:
+                    prepared.append((index, tc, name, args))
 
             scheduled_results = await self.tool_scheduler.execute_many(
                 [
@@ -493,9 +767,52 @@ class Agent:
             ):
                 outcomes[index] = tool_result
 
+            provider_response_id = (
+                str(response.next_turn_state.value)
+                if response.next_turn_state is not None
+                else None
+            )
+            for index, tc, name, args in background_prepared:
+                if provider_response_id is None:
+                    outcomes[index] = ToolResult.failed(
+                        call_id=tc.id,
+                        tool_name=name,
+                        message="异步工具调用缺少 provider response_id",
+                        error_code="missing_response_id",
+                    )
+                    background_indices.discard(index)
+                    continue
+                queued = await self.task_registry.submit(
+                    ToolInvocation(call_id=tc.id, name=name, arguments=args),
+                    run_id=factory.run_id,
+                    session_id=session.id,
+                    provider=type(self.llm).__name__,
+                    provider_call_id=tc.id,
+                    provider_response_id=provider_response_id,
+                    latest_response_id=provider_response_id,
+                    metadata={
+                        "step": step,
+                        "output_index": index,
+                        "pending_group_id": pending_group_id,
+                    },
+                )
+                active_pending_ids.append(queued.task_id)
+                yield factory.create(
+                    "tool_task_queued",
+                    {
+                        "step": step,
+                        "task_id": queued.task_id,
+                        "call_id": tc.id,
+                        "name": name,
+                        "status": queued.status,
+                    },
+                )
+
             # 结果按模型原始 tool-call 顺序回灌，避免并发完成顺序改变上下文语义。
             for index, tc in enumerate(response.tool_calls):
                 name = tc.name
+                if index in background_indices:
+                    continue
                 outcome = outcomes[index]
                 if isinstance(outcome, str):
                     result = outcome
@@ -559,6 +876,17 @@ class Agent:
 
             turn_state = response.next_turn_state
             delta_messages = tool_result_messages
+            if not tool_result_messages and active_pending_ids:
+                content = (response.text or "").strip()
+                yield factory.create(
+                    "run_pending",
+                    {
+                        "content": content,
+                        "step": step,
+                        "task_ids": list(active_pending_ids),
+                    },
+                )
+                return
 
         content = f"[已达到最大步数 {self.config.max_steps}，提前结束]"
         yield factory.create("max_steps", {"content": content})

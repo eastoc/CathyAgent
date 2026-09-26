@@ -107,3 +107,4 @@ class AgentResult:
     run_id: str
     status: str
     trace: Any = field(repr=False, compare=False)
+    pending_task_ids: tuple[str, ...] = ()

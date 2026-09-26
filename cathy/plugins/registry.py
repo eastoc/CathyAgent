@@ -126,7 +126,7 @@ class PluginRegistry:
                         name=tool.name,
                         description=tool.description,
                         input_schema=tool.input_schema,
-                        async_execution=tool.execution_mode == "background",
+                        async_hint=tool.execution_mode == "background",
                     )
                 )
         return tools

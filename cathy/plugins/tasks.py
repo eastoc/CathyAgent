@@ -158,6 +158,15 @@ class TaskRegistry:
         self._notify(updated)
         return updated
 
+    def update_metadata(self, task_id: str, **values: Any) -> ToolTaskRecord:
+        """合并任务元数据，用于记录 continuation 是否已经回填。"""
+
+        record = self._require(task_id)
+        updated = record.with_updates(metadata={**dict(record.metadata), **values})
+        self._store.update_tool_task(updated)
+        self._notify(updated)
+        return updated
+
     def build_model_continuation(
         self,
         task_id: str,
@@ -255,7 +264,11 @@ class TaskRegistry:
         )
 
     def _transition(self, record: ToolTaskRecord, **values: Any) -> ToolTaskRecord:
-        updated = record.with_updates(**values)
+        # 后台任务执行期间，continuation 可能推进 latest_response_id 或补充
+        # metadata。状态迁移必须基于存储中的最新快照，避免完成回写覆盖
+        # 这些字段。
+        latest = self._store.load_tool_task(record.task_id) or record
+        updated = latest.with_updates(**values)
         self._store.update_tool_task(updated)
         self._notify(updated)
         return updated

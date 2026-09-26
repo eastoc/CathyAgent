@@ -19,7 +19,7 @@ class ModelTool:
     description: str
     input_schema: Mapping[str, Any]
     strict: bool | None = None
-    async_execution: bool = False
+    async_hint: bool = False
 
 
 @dataclass(frozen=True)

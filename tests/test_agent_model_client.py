@@ -131,6 +131,35 @@ def _concurrent_registry(plugin: _ConcurrentPlugin) -> PluginRegistry:
     return registry
 
 
+def _background_registry(plugin: _ConcurrentPlugin) -> PluginRegistry:
+    registry = PluginRegistry(plugins_dirs=[])
+    registry.register_internal_plugin(
+        PluginManifest(
+            name="background",
+            version="0.0.1",
+            description="background tool",
+            tools=[
+                ToolSpec(
+                    name="analyze",
+                    description="analyze",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                        "required": ["value"],
+                    },
+                    execution_mode="background",
+                )
+            ],
+            permissions={},
+            execution=Execution(runtime="python", entrypoint="<internal>:Background"),
+            metadata={"trust_level": "builtin"},
+            source_dir=Path(__file__).parent,
+        ),
+        plugin,
+    )
+    return registry
+
+
 class AgentModelClientTest(unittest.TestCase):
     def test_multiple_tool_calls_run_concurrently_and_preserve_message_order(self) -> None:
         plugin = _ConcurrentPlugin()
@@ -264,6 +293,183 @@ class AgentModelClientTest(unittest.TestCase):
         self.assertEqual(
             second.delta_messages[0]["content"][0]["text"],
             "echo:ping",
+        )
+
+    def test_sync_entry_waits_until_background_continuation_finishes(self) -> None:
+        plugin = _ConcurrentPlugin()
+        model = _ScriptedModelClient(
+            [
+                ModelResponse(
+                    tool_calls=(
+                        ModelToolCall(
+                            id="call_sync_bg",
+                            name="analyze",
+                            arguments={"value": "sample"},
+                            async_execution=True,
+                        ),
+                    ),
+                    next_turn_state=ModelTurnState("resp_sync_bg"),
+                ),
+                ModelResponse(text="同步兼容完成"),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            store = SessionStore(Path(td) / "session.db")
+            session = store.create()
+            agent = Agent(
+                llm=model,
+                tools=_background_registry(plugin),
+                assembler=ContextAssembler(token_budget=4096),
+                store=store,
+            )
+
+            answer, _trace = agent.run(session, "后台分析")
+            store.close()
+
+        self.assertEqual(answer, "同步兼容完成")
+        self.assertEqual(len(model.requests), 2)
+
+
+class AgentPendingToolTest(unittest.IsolatedAsyncioTestCase):
+    async def test_background_tool_returns_pending_and_resumes_with_original_ids(
+        self,
+    ) -> None:
+        plugin = _ConcurrentPlugin()
+        model = _ScriptedModelClient(
+            [
+                ModelResponse(
+                    tool_calls=(
+                        ModelToolCall(
+                            id="call_async_1",
+                            name="analyze",
+                            arguments={"value": "sample"},
+                            async_execution=True,
+                        ),
+                    ),
+                    next_turn_state=ModelTurnState("resp_async_1"),
+                ),
+                ModelResponse(
+                    text="后台分析完成",
+                    next_turn_state=ModelTurnState("resp_async_2"),
+                ),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            store = SessionStore(Path(td) / "session.db")
+            session = store.create()
+            agent = Agent(
+                llm=model,
+                tools=_background_registry(plugin),
+                assembler=ContextAssembler(token_budget=4096),
+                store=store,
+            )
+            self.assertTrue(agent.tools.model_tools()[0].async_hint)
+
+            pending = await agent.arun(session, "异步分析")
+            self.assertEqual(pending.status, "pending")
+            self.assertEqual(len(pending.pending_task_ids), 1)
+
+            completed = await agent.aresume_task(
+                session,
+                pending.pending_task_ids[0],
+            )
+            persisted = agent.task_registry.get(pending.pending_task_ids[0])
+            store.close()
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(completed.content, "后台分析完成")
+        self.assertEqual(len(model.requests), 2)
+        continuation = model.requests[1]
+        assert continuation.turn_state is not None
+        self.assertEqual(continuation.turn_state.value, "resp_async_1")
+        assert continuation.delta_messages is not None
+        self.assertEqual(
+            continuation.delta_messages[0]["tool_call_id"],
+            "call_async_1",
+        )
+        assert persisted is not None
+        self.assertEqual(persisted.provider_call_id, "call_async_1")
+        self.assertEqual(persisted.latest_response_id, "resp_async_1")
+        self.assertTrue(persisted.metadata["continuation_delivered"])
+
+    async def test_multiple_pending_tasks_advance_latest_response_id_serially(
+        self,
+    ) -> None:
+        plugin = _ConcurrentPlugin()
+        model = _ScriptedModelClient(
+            [
+                ModelResponse(
+                    tool_calls=(
+                        ModelToolCall(
+                            id="call_async_1",
+                            name="analyze",
+                            arguments={"value": "one"},
+                            async_execution=True,
+                        ),
+                        ModelToolCall(
+                            id="call_async_2",
+                            name="analyze",
+                            arguments={"value": "two"},
+                            async_execution=True,
+                        ),
+                    ),
+                    next_turn_state=ModelTurnState("resp_async_1"),
+                ),
+                ModelResponse(
+                    text="第一个完成",
+                    next_turn_state=ModelTurnState("resp_async_2"),
+                ),
+                ModelResponse(
+                    text="全部完成",
+                    next_turn_state=ModelTurnState("resp_async_3"),
+                ),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            store = SessionStore(Path(td) / "session.db")
+            session = store.create()
+            agent = Agent(
+                llm=model,
+                tools=_background_registry(plugin),
+                assembler=ContextAssembler(token_budget=4096),
+                store=store,
+            )
+
+            first_run = await agent.arun(session, "并行异步分析")
+            self.assertEqual(len(first_run.pending_task_ids), 2)
+            second_run = await agent.aresume_task(
+                session,
+                first_run.pending_task_ids[0],
+            )
+            self.assertEqual(second_run.status, "pending")
+            self.assertEqual(
+                second_run.pending_task_ids,
+                (first_run.pending_task_ids[1],),
+            )
+            final_run = await agent.aresume_task(
+                session,
+                second_run.pending_task_ids[0],
+            )
+            store.close()
+
+        self.assertEqual(final_run.status, "completed")
+        self.assertEqual(final_run.content, "全部完成")
+        assert model.requests[1].turn_state is not None
+        assert model.requests[2].turn_state is not None
+        self.assertEqual(model.requests[1].turn_state.value, "resp_async_1")
+        self.assertEqual(model.requests[2].turn_state.value, "resp_async_2")
+        assert model.requests[1].delta_messages is not None
+        assert model.requests[2].delta_messages is not None
+        self.assertEqual(
+            model.requests[1].delta_messages[0]["tool_call_id"],
+            "call_async_1",
+        )
+        self.assertEqual(
+            model.requests[2].delta_messages[0]["tool_call_id"],
+            "call_async_2",
         )
 
 

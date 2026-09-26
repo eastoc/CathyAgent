@@ -98,13 +98,28 @@ class OpenAIResponsesClient:
         kwargs["stream"] = True
         stream = await self._acreate_with_retry(kwargs, stage=request.stage)
         started = False
+        streaming_tool_calls: dict[str, dict[str, Any]] = {}
+        streaming_tool_calls_by_index: dict[int, dict[str, Any]] = {}
+        completed_tool_items: set[str] = set()
+        completed_tool_call_ids: set[str] = set()
 
         try:
             async for event in stream:
                 event_type = str(getattr(event, "type", ""))
                 if event_type == "response.created":
                     started = True
-                    yield ModelEvent(type="response_started", raw=event)
+                    raw_response = getattr(event, "response", None)
+                    yield ModelEvent(
+                        type="response_started",
+                        metadata={
+                            "response_id": str(
+                                getattr(raw_response, "id", None)
+                                or getattr(event, "response_id", None)
+                                or ""
+                            )
+                        },
+                        raw=event,
+                    )
                     continue
 
                 if not started:
@@ -126,41 +141,127 @@ class OpenAIResponsesClient:
                 elif event_type == "response.output_item.added":
                     item = getattr(event, "item", None)
                     if getattr(item, "type", None) == "function_call":
+                        output_index = getattr(event, "output_index", None)
+                        item_id = str(getattr(item, "id", None) or "")
+                        state = {
+                            "item_id": item_id,
+                            "call_id": str(getattr(item, "call_id", None) or ""),
+                            "name": str(getattr(item, "name", "") or ""),
+                            "async_execution": _response_item_is_async(item),
+                            "output_index": output_index,
+                            "argument_parts": [],
+                        }
+                        if item_id:
+                            streaming_tool_calls[item_id] = state
+                        if isinstance(output_index, int):
+                            streaming_tool_calls_by_index[output_index] = state
                         yield ModelEvent(
                             type="tool_call_started",
                             metadata={
-                                "call_id": str(
-                                    getattr(item, "call_id", None)
-                                    or getattr(item, "id", None)
-                                    or ""
-                                ),
-                                "name": str(getattr(item, "name", "") or ""),
-                                "async_execution": _response_item_is_async(item),
-                                "output_index": getattr(event, "output_index", None),
+                                "item_id": item_id,
+                                "call_id": state["call_id"],
+                                "name": state["name"],
+                                "async_execution": state["async_execution"],
+                                "output_index": output_index,
                             },
                             raw=event,
                         )
                 elif event_type == "response.function_call_arguments.delta":
+                    item_id = str(getattr(event, "item_id", "") or "")
+                    output_index = getattr(event, "output_index", None)
+                    state = streaming_tool_calls.get(item_id)
+                    if state is None and isinstance(output_index, int):
+                        state = streaming_tool_calls_by_index.get(output_index)
+                    delta = str(getattr(event, "delta", "") or "")
+                    if state is not None:
+                        state["argument_parts"].append(delta)
                     yield ModelEvent(
                         type="tool_call_delta",
-                        text=str(getattr(event, "delta", "") or ""),
+                        text=delta,
                         metadata={
-                            "call_id": str(getattr(event, "item_id", "") or ""),
-                            "output_index": getattr(event, "output_index", None),
+                            "item_id": item_id,
+                            "call_id": state["call_id"] if state is not None else "",
+                            "output_index": output_index,
                         },
                         raw=event,
                     )
+                elif event_type in {
+                    "response.function_call_arguments.done",
+                    "response.output_item.done",
+                }:
+                    item = getattr(event, "item", None)
+                    item_id = str(
+                        getattr(event, "item_id", None)
+                        or getattr(item, "id", None)
+                        or ""
+                    )
+                    output_index = getattr(event, "output_index", None)
+                    state = streaming_tool_calls.get(item_id)
+                    if state is None and isinstance(output_index, int):
+                        state = streaming_tool_calls_by_index.get(output_index)
+                    if state is not None and item_id not in completed_tool_items:
+                        if item is not None:
+                            state["call_id"] = str(
+                                getattr(item, "call_id", None)
+                                or state["call_id"]
+                            )
+                            state["name"] = str(
+                                getattr(item, "name", None) or state["name"]
+                            )
+                            item_async = _response_item_async_value(item)
+                            if item_async is not None:
+                                state["async_execution"] = item_async
+                        arguments = getattr(event, "arguments", None)
+                        if arguments is None and item is not None:
+                            arguments = getattr(item, "arguments", None)
+                        if arguments is None:
+                            arguments = "".join(state["argument_parts"])
+                        raw_arguments, parsed_arguments = _parse_arguments(
+                            arguments or "{}"
+                        )
+                        tool_call = ModelToolCall(
+                            id=state["call_id"],
+                            name=state["name"],
+                            arguments=parsed_arguments,
+                            raw_arguments=raw_arguments,
+                            async_execution=bool(state["async_execution"]),
+                        )
+                        completed_tool_items.add(item_id)
+                        completed_tool_call_ids.add(tool_call.id)
+                        yield ModelEvent(
+                            type="tool_call_completed",
+                            metadata={
+                                "item_id": item_id,
+                                "output_index": output_index,
+                                "tool_call": tool_call,
+                            },
+                            raw=event,
+                        )
                 elif event_type in {"response.completed", "response.incomplete"}:
                     raw_response = getattr(event, "response", None)
                     if raw_response is None:
                         raise RuntimeError(f"{event_type} 事件缺少 response")
+                    normalized = normalize_responses_response(raw_response)
+                    for tool_call in normalized.tool_calls:
+                        if tool_call.id in completed_tool_call_ids:
+                            continue
+                        completed_tool_call_ids.add(tool_call.id)
+                        yield ModelEvent(
+                            type="tool_call_completed",
+                            metadata={
+                                "item_id": "",
+                                "output_index": None,
+                                "tool_call": tool_call,
+                            },
+                            raw=event,
+                        )
                     yield ModelEvent(
                         type=(
                             "response_completed"
                             if event_type == "response.completed"
                             else "response_incomplete"
                         ),
-                        response=normalize_responses_response(raw_response),
+                        response=normalized,
                         raw=event,
                     )
                 elif event_type in {"error", "response.failed"}:
@@ -292,7 +393,7 @@ def convert_response_tool(tool: ModelTool) -> dict[str, Any]:
         converted["description"] = tool.description
     if tool.strict is not None:
         converted["strict"] = tool.strict
-    if tool.async_execution:
+    if tool.async_hint:
         converted["async"] = True
     return converted
 
@@ -525,7 +626,11 @@ def _parse_arguments(raw_arguments: Any) -> tuple[str, Mapping[str, Any]]:
 
 
 def _response_item_is_async(item: Any) -> bool:
+    return bool(_response_item_async_value(item))
+
+
+def _response_item_async_value(item: Any) -> bool | None:
     value = getattr(item, "async_", None)
     if value is None:
-        value = getattr(item, "async", False)
-    return bool(value)
+        value = getattr(item, "async", None)
+    return bool(value) if value is not None else None

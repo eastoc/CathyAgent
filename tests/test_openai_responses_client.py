@@ -117,15 +117,27 @@ class OpenAIResponsesClientTest(unittest.TestCase):
                     output_index=1,
                     item=SimpleNamespace(
                         type="function_call",
+                        id="fc_1",
                         call_id="call_1",
                         name="echo",
                     ),
                 ),
                 SimpleNamespace(
                     type="response.function_call_arguments.delta",
-                    item_id="call_1",
+                    item_id="fc_1",
                     output_index=1,
                     delta='{"msg":"hi"}',
+                ),
+                SimpleNamespace(
+                    type="response.output_item.done",
+                    output_index=1,
+                    item=SimpleNamespace(
+                        type="function_call",
+                        id="fc_1",
+                        call_id="call_1",
+                        name="echo",
+                        arguments='{"msg":"hi"}',
+                    ),
                 ),
                 SimpleNamespace(
                     type="response.completed",
@@ -157,6 +169,7 @@ class OpenAIResponsesClientTest(unittest.TestCase):
                 "text_delta",
                 "tool_call_started",
                 "tool_call_delta",
+                "tool_call_completed",
                 "response_completed",
             ],
         )
@@ -165,6 +178,11 @@ class OpenAIResponsesClientTest(unittest.TestCase):
             '任务完成{"msg":"hi"}',
         )
         self.assertEqual(events[3].metadata["call_id"], "call_1")
+        self.assertEqual(events[4].metadata["item_id"], "fc_1")
+        self.assertEqual(events[4].metadata["call_id"], "call_1")
+        completed_call = events[5].metadata["tool_call"]
+        self.assertEqual(completed_call.id, "call_1")
+        self.assertEqual(completed_call.arguments, {"msg": "hi"})
         final = events[-1].response
         self.assertIsNotNone(final)
         assert final is not None
@@ -240,7 +258,7 @@ class OpenAIResponsesClientTest(unittest.TestCase):
                             "type": "object",
                             "properties": {"x": {"type": "number"}},
                         },
-                        async_execution=True,
+                        async_hint=True,
                     )
                 ],
             )
