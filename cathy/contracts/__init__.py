@@ -1,6 +1,6 @@
 """CathyAgent 内部稳定接口契约。"""
 
-from .agent import AgentRequest
+from .agent import AgentEvent, AgentRequest, AgentResult, RunContext
 from .content import (
     AttachmentRef,
     AttachmentResolver,
@@ -11,7 +11,9 @@ from .content import (
     TextBlock,
 )
 from .model import (
+    AsyncModelClient,
     ModelClient,
+    ModelEvent,
     ModelRequest,
     ModelResponse,
     ModelTool,
@@ -20,18 +22,23 @@ from .model import (
 )
 
 __all__ = [
+    "AgentEvent",
     "AgentRequest",
+    "AgentResult",
     "AttachmentRef",
     "AttachmentResolver",
     "ContentBlock",
     "FileBlock",
     "ImageBlock",
     "JsonBlock",
+    "AsyncModelClient",
     "ModelClient",
+    "ModelEvent",
     "ModelRequest",
     "ModelResponse",
     "ModelTool",
     "ModelToolCall",
     "ModelTurnState",
+    "RunContext",
     "TextBlock",
 ]

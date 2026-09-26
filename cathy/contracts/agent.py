@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
@@ -62,3 +63,47 @@ class AgentRequest:
         if not inserted:
             updated.insert(0, TextBlock(text))
         return AgentRequest(content=tuple(updated), metadata=self.metadata)
+
+
+@dataclass(frozen=True)
+class RunContext:
+    """一次 Agent 运行的调用方上下文。
+
+    episode_id 和 env_idx 只作为不透明关联字段存在，Harness 不依赖
+    任何机器人或 benchmark 实现。
+    """
+
+    run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    episode_id: str | None = None
+    env_idx: int | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        metadata = dict(self.metadata)
+        try:
+            json.dumps(metadata, ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("RunContext.metadata 必须可 JSON 序列化") from exc
+        object.__setattr__(self, "metadata", metadata)
+
+
+@dataclass(frozen=True)
+class AgentEvent:
+    """异步主循环向 CLI、机器人适配器和采样器发布的统一事件。"""
+
+    type: str
+    run_id: str
+    session_id: str
+    sequence: int
+    timestamp: float
+    payload: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AgentResult:
+    """一次 Agent 运行的最终结果；trace 避免与 agent.py 循环依赖。"""
+
+    content: str
+    run_id: str
+    status: str
+    trace: Any = field(repr=False, compare=False)

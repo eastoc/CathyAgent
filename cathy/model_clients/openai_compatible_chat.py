@@ -6,11 +6,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any, Mapping, Sequence
 
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 
 from ..contracts import (
     AttachmentResolver,
@@ -84,6 +85,12 @@ class OpenAICompatibleChatClient:
         if not api_key:
             raise ValueError("LLM api_key 未配置")
         self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+        self._async_client: AsyncOpenAI | None = None
+        self._async_client_options = {
+            "api_key": api_key,
+            "base_url": base_url,
+            "timeout": timeout,
+        }
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -117,20 +124,40 @@ class OpenAICompatibleChatClient:
 
     def generate(self, request: ModelRequest) -> ModelResponse:
         """执行请求并把 Chat Completions 响应归一化为模型协议。"""
-        response = self.chat(
-            convert_chat_messages(
+        kwargs = self._build_request_kwargs(request)
+        response = self._create_with_retry(kwargs, stage=request.stage)
+        return normalize_chat_response(response)
+
+    async def agenerate(self, request: ModelRequest) -> ModelResponse:
+        """原生异步执行 Chat Completions 请求。"""
+        kwargs = self._build_request_kwargs(request)
+        response = await self._acreate_with_retry(kwargs, stage=request.stage)
+        return normalize_chat_response(response)
+
+    def _build_request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": convert_chat_messages(
                 request.messages,
                 attachment_resolver=request.attachment_resolver,
             ),
-            tools=(
-                [convert_chat_tool(tool) for tool in request.tools]
-                if request.tools is not None
-                else None
-            ),
-            tool_choice=request.tool_choice,
-            stage=request.stage,
+        }
+        apply_temperature(
+            kwargs,
+            model=self.model,
+            temperature=self.temperature,
         )
-        return normalize_chat_response(response)
+        apply_token_limit(
+            kwargs,
+            model=self.model,
+            max_tokens=self.max_tokens,
+        )
+        if self.extra_body:
+            kwargs["extra_body"] = self.extra_body
+        if request.tools:
+            kwargs["tools"] = [convert_chat_tool(tool) for tool in request.tools]
+            kwargs["tool_choice"] = request.tool_choice or "auto"
+        return kwargs
 
     def _create_with_retry(self, kwargs: dict[str, Any], *, stage: str) -> Any:
         attempts_allowed = self.max_retries + 1
@@ -148,11 +175,40 @@ class OpenAICompatibleChatClient:
             raise LLMCallError(last_failure)
         raise RuntimeError("LLM call retry loop ended unexpectedly")
 
+    async def _acreate_with_retry(
+        self,
+        kwargs: dict[str, Any],
+        *,
+        stage: str,
+    ) -> Any:
+        if self._async_client is None:
+            self._async_client = AsyncOpenAI(**self._async_client_options)
+        attempts_allowed = self.max_retries + 1
+        last_failure = None
+        for attempt in range(1, attempts_allowed + 1):
+            try:
+                return await self._async_client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                failure = classify_llm_exception(exc, stage=stage, attempts=attempt)
+                last_failure = failure
+                if not failure.retryable or attempt >= attempts_allowed:
+                    raise LLMCallError(failure) from exc
+                await self._asleep_before_retry(attempt)
+        if last_failure is not None:
+            raise LLMCallError(last_failure)
+        raise RuntimeError("Async LLM call retry loop ended unexpectedly")
+
     def _sleep_before_retry(self, attempt: int) -> None:
         delay = self.retry_backoff_initial_sec * (2 ** max(0, attempt - 1))
         delay = min(delay, self.retry_backoff_max_sec)
         if delay > 0:
             time.sleep(delay)
+
+    async def _asleep_before_retry(self, attempt: int) -> None:
+        delay = self.retry_backoff_initial_sec * (2 ** max(0, attempt - 1))
+        delay = min(delay, self.retry_backoff_max_sec)
+        if delay > 0:
+            await asyncio.sleep(delay)
 
 
 def convert_chat_messages(

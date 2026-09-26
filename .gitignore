@@ -5,6 +5,8 @@ __pycache__/
 
 workspaces/
 data/
+tests/
+tests/**
 /data/**
 /log/
 *.db

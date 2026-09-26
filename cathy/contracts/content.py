@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Protocol, Sequence, TypeAlias, runtime_checkable
+from typing import Any, Mapping, Protocol, Sequence, Union, runtime_checkable
+
+try:
+    from typing import TypeAlias
+except ImportError:  # Python 3.8
+    from typing_extensions import TypeAlias
 
 
 @dataclass(frozen=True)
@@ -86,7 +91,7 @@ class JsonBlock:
             raise ValueError("JsonBlock.value 必须可 JSON 序列化") from exc
 
 
-ContentBlock: TypeAlias = TextBlock | ImageBlock | FileBlock | JsonBlock
+ContentBlock: TypeAlias = Union[TextBlock, ImageBlock, FileBlock, JsonBlock]
 
 
 def attachment_to_dict(ref: AttachmentRef) -> dict[str, Any]:

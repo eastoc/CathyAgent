@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import functools
 from typing import Any, Sequence
 
 from ..contracts import (
@@ -63,3 +65,48 @@ def generate_model_response(
             tool_choice=tool_choice,
         )
     return normalize_chat_response(raw_response)
+
+
+async def agenerate_model_response(
+    llm: Any,
+    messages: Sequence[dict[str, Any]],
+    *,
+    tools: Sequence[ModelTool] | None = None,
+    tool_choice: str | None = "auto",
+    stage: str,
+    turn_state: ModelTurnState | None = None,
+    delta_messages: Sequence[dict[str, Any]] | None = None,
+    attachment_resolver: AttachmentResolver | None = None,
+) -> ModelResponse:
+    """优先调用原生 agenerate，同步客户端在线程池中兼容。
+
+    兼容路径不能强制终止已经开始的同步网络请求，只用于迁移；provider
+    adapter 应逐步实现原生异步接口。
+    """
+
+    request = ModelRequest(
+        messages=messages,
+        tools=tools,
+        tool_choice=tool_choice,
+        stage=stage,
+        turn_state=turn_state,
+        delta_messages=delta_messages,
+        attachment_resolver=attachment_resolver,
+    )
+    agenerate = getattr(llm, "agenerate", None)
+    if callable(agenerate):
+        return await agenerate(request)
+
+    loop = asyncio.get_running_loop()
+    call = functools.partial(
+        generate_model_response,
+        llm,
+        messages,
+        tools=tools,
+        tool_choice=tool_choice,
+        stage=stage,
+        turn_state=turn_state,
+        delta_messages=delta_messages,
+        attachment_resolver=attachment_resolver,
+    )
+    return await loop.run_in_executor(None, call)

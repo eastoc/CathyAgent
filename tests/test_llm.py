@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -31,6 +32,38 @@ class _RetryableServerError(Exception):
 
 
 class LLMClientTest(unittest.TestCase):
+    @patch("cathy.model_clients.openai_compatible_chat.AsyncOpenAI")
+    @patch("cathy.model_clients.openai_compatible_chat.OpenAI")
+    def test_agenerate_uses_native_async_client(
+        self,
+        _openai_cls: MagicMock,
+        async_openai_cls: MagicMock,
+    ) -> None:
+        message = SimpleNamespace(
+            content="异步完成",
+            reasoning_content=None,
+            tool_calls=None,
+        )
+        async_openai_cls.return_value.chat.completions.create = AsyncMock(
+            return_value=SimpleNamespace(
+                choices=[SimpleNamespace(message=message)]
+            )
+        )
+        client = LLMClient(
+            api_key="test-key",
+            base_url="https://api.example/v1",
+            model="qwen-plus",
+        )
+
+        response = asyncio.run(
+            client.agenerate(
+                ModelRequest(messages=[{"role": "user", "content": "执行任务"}])
+            )
+        )
+
+        self.assertEqual(response.text, "异步完成")
+        async_openai_cls.return_value.chat.completions.create.assert_awaited_once()
+
     def test_chat_adapter_collapses_text_blocks_for_text_models(self) -> None:
         messages = convert_chat_messages(
             [{"role": "user", "content": text_model_content("你好")}]

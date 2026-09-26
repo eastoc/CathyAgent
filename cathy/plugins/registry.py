@@ -154,6 +154,29 @@ class PluginRegistry:
         except Exception as exc:
             return f"[ToolError:{tool_name}] {type(exc).__name__}: {exc}"
 
+    async def acall(self, tool_name: str, params: dict[str, Any]) -> str:
+        """异步调度工具；参数校验和错误格式与同步 call 一致。"""
+        plugin_name = self._tool_index.get(tool_name)
+        if plugin_name is None:
+            return f"[ToolError] 未知工具: {tool_name}"
+
+        loaded = self._loaded[plugin_name]
+        tool_spec = loaded.tool_index[tool_name]
+        try:
+            Draft202012Validator(tool_spec.input_schema).validate(params)
+        except ValidationError as exc:
+            path = ".".join(str(x) for x in exc.absolute_path) or "<root>"
+            return f"[ToolError:{tool_name}] 参数不合法 @ {path}: {exc.message}"
+
+        try:
+            return await loaded.instance.aexecute(tool_name, params)
+        except PluginError as exc:
+            return f"[ToolError:{tool_name}] {exc}"
+        except TypeError as exc:
+            return f"[ToolError:{tool_name}] 参数不合法: {exc}"
+        except Exception as exc:
+            return f"[ToolError:{tool_name}] {type(exc).__name__}: {exc}"
+
     # -------- 观测 / 调试接口 -------- #
 
     def list_tools(self) -> list[ToolDescriptor]:
@@ -284,6 +307,11 @@ class ToolView:
         if not self._is_visible(tool_name):
             return f"[ToolError:{tool_name}] 此工具不在 subagent 白名单内"
         return self._registry.call(tool_name, params)
+
+    async def acall(self, tool_name: str, params: dict[str, Any]) -> str:
+        if not self._is_visible(tool_name):
+            return f"[ToolError:{tool_name}] 此工具不在 subagent 白名单内"
+        return await self._registry.acall(tool_name, params)
 
     def list_tools(self) -> list[ToolDescriptor]:
         return [d for d in self._registry.list_tools() if self._is_visible(d.name)]

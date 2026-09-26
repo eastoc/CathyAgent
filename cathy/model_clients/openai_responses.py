@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any, Mapping, Sequence
 
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 
 from ..contracts import (
     AttachmentResolver,
@@ -55,6 +56,12 @@ class OpenAIResponsesClient:
             raise ValueError("max_output_tokens 必须是正整数或 None")
 
         self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+        self._async_client: AsyncOpenAI | None = None
+        self._async_client_options = {
+            "api_key": api_key,
+            "base_url": base_url,
+            "timeout": timeout,
+        }
         self.model = model
         self.reasoning_effort = effort
         self.max_output_tokens = (
@@ -69,6 +76,17 @@ class OpenAIResponsesClient:
 
     def generate(self, request: ModelRequest) -> ModelResponse:
         """执行一次 Responses 请求并返回供应商无关的模型输出。"""
+        kwargs = self._build_request_kwargs(request)
+        response = self._create_with_retry(kwargs, stage=request.stage)
+        return normalize_responses_response(response)
+
+    async def agenerate(self, request: ModelRequest) -> ModelResponse:
+        """原生异步执行 Responses 请求。"""
+        kwargs = self._build_request_kwargs(request)
+        response = await self._acreate_with_retry(kwargs, stage=request.stage)
+        return normalize_responses_response(response)
+
+    def _build_request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         input_messages = request.messages
         if request.turn_state and request.delta_messages is not None:
             input_messages = request.delta_messages
@@ -89,9 +107,7 @@ class OpenAIResponsesClient:
         if request.tools:
             kwargs["tools"] = [convert_response_tool(tool) for tool in request.tools]
             kwargs["tool_choice"] = convert_tool_choice(request.tool_choice)
-
-        response = self._create_with_retry(kwargs, stage=request.stage)
-        return normalize_responses_response(response)
+        return kwargs
 
     def _create_with_retry(self, kwargs: dict[str, Any], *, stage: str) -> Any:
         attempts_allowed = self.max_retries + 1
@@ -109,11 +125,40 @@ class OpenAIResponsesClient:
             raise LLMCallError(last_failure)
         raise RuntimeError("Responses API retry loop ended unexpectedly")
 
+    async def _acreate_with_retry(
+        self,
+        kwargs: dict[str, Any],
+        *,
+        stage: str,
+    ) -> Any:
+        if self._async_client is None:
+            self._async_client = AsyncOpenAI(**self._async_client_options)
+        attempts_allowed = self.max_retries + 1
+        last_failure = None
+        for attempt in range(1, attempts_allowed + 1):
+            try:
+                return await self._async_client.responses.create(**kwargs)
+            except Exception as exc:
+                failure = classify_llm_exception(exc, stage=stage, attempts=attempt)
+                last_failure = failure
+                if not failure.retryable or attempt >= attempts_allowed:
+                    raise LLMCallError(failure) from exc
+                await self._asleep_before_retry(attempt)
+        if last_failure is not None:
+            raise LLMCallError(last_failure)
+        raise RuntimeError("Responses API async retry loop ended unexpectedly")
+
     def _sleep_before_retry(self, attempt: int) -> None:
         delay = self.retry_backoff_initial_sec * (2 ** max(0, attempt - 1))
         delay = min(delay, self.retry_backoff_max_sec)
         if delay > 0:
             time.sleep(delay)
+
+    async def _asleep_before_retry(self, attempt: int) -> None:
+        delay = self.retry_backoff_initial_sec * (2 ** max(0, attempt - 1))
+        delay = min(delay, self.retry_backoff_max_sec)
+        if delay > 0:
+            await asyncio.sleep(delay)
 
 
 def convert_response_tool(tool: ModelTool) -> dict[str, Any]:

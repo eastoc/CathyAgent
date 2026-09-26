@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -35,6 +36,34 @@ class _RetryableServerError(Exception):
 
 
 class OpenAIResponsesClientTest(unittest.TestCase):
+    @patch("cathy.model_clients.openai_responses.AsyncOpenAI")
+    @patch("cathy.model_clients.openai_responses.OpenAI")
+    def test_agenerate_uses_native_async_client(
+        self,
+        _openai_cls: MagicMock,
+        async_openai_cls: MagicMock,
+    ) -> None:
+        async_openai_cls.return_value.responses.create = AsyncMock(
+            return_value=SimpleNamespace(
+                id="resp_async",
+                output_text="异步完成",
+                output=[],
+            )
+        )
+        client = OpenAIResponsesClient(
+            api_key="test-key",
+            base_url="https://api.openai.com/v1",
+        )
+
+        response = asyncio.run(
+            client.agenerate(
+                ModelRequest(messages=[{"role": "user", "content": "执行任务"}])
+            )
+        )
+
+        self.assertEqual(response.text, "异步完成")
+        async_openai_cls.return_value.responses.create.assert_awaited_once()
+
     @patch("cathy.model_clients.openai_responses.OpenAI")
     def test_generate_uses_astra_responses_parameters(self, openai_cls: MagicMock) -> None:
         openai_cls.return_value.responses.create.return_value = SimpleNamespace(

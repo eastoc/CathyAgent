@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import functools
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -33,6 +35,17 @@ class ToolPlugin(ABC):
             PluginError: 工具内可控的失败（参数业务错误等）。
             其它异常会被 Registry 兜底转成结构化错误。
         """
+
+    async def aexecute(self, tool_name: str, params: dict[str, Any]) -> str:
+        """异步执行工具；默认把旧同步插件放入线程池。
+
+        新插件应覆盖本方法提供原生异步实现。该兼容层无法强制终止已经开始
+        的同步调用，因此不适合不可撤销的长时间机器人动作。
+        """
+
+        loop = asyncio.get_running_loop()
+        call = functools.partial(self.execute, tool_name, params)
+        return await loop.run_in_executor(None, call)
 
     def health_check(self) -> bool:
         """Registry 可定期探活；默认返回 True。"""

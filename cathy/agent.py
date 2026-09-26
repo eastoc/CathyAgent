@@ -1,26 +1,29 @@
-"""Single-loop ReAct Agent（session-aware，Phase 3.5 起接入 hooks）。
+"""Session-aware 的异步 ReAct Agent 主循环。
 
-主循环职责：
-1. 用 ContextAssembler 把 [system] + 历史(预算内) + 当前 user 输入 拼成 messages；
-2. 调用 LLM 得到下一条 assistant 消息；
-3. 若包含 tool_calls，逐个执行并把结果以 role=tool 写回 messages，并**实时持久化**到 Session；
-4. 否则把最终 assistant 消息持久化并返回。
-
-Hooks 接入点（Phase 3.5）：
-- UserPromptSubmit : run() 入口、user 消息持久化前
-- PreToolUse       : 单个 tool_call 执行前
-- PostToolUse      : 单个 tool_call 执行后
-- Stop             : 准备 return final_answer 之前
+astream() 是唯一真实执行入口；arun() 负责收集结果，run()/run_request()
+仅保留为同步兼容层。当前阶段保持工具串行执行，后续在 ToolExecutionPolicy
+就绪后再按资源键引入受控并发。
 """
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 import time
+import weakref
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, AsyncIterator, Callable
 
-from .contracts import AgentRequest, AttachmentResolver, ModelClient, ModelToolCall
+from .contracts import (
+    AgentEvent,
+    AgentRequest,
+    AgentResult,
+    AttachmentResolver,
+    ModelClient,
+    ModelToolCall,
+    RunContext,
+)
 from .contracts.content import serialize_content_blocks, text_content, text_model_content
 from .context import ContextAssembler
 from .hooks import (
@@ -32,7 +35,7 @@ from .hooks import (
     USER_PROMPT_SUBMIT,
 )
 from .llm_errors import LLMCallError
-from .model_clients import generate_model_response
+from .model_clients.invoke import agenerate_model_response
 from .plugins import PluginRegistry
 from .session.models import Message, Session
 from .session.store import SessionStore
@@ -45,12 +48,30 @@ class AgentConfig:
 
 @dataclass
 class AgentTrace:
-    """一次 run() 的可观测结构，便于后续接日志/审计。"""
+    """一次运行的兼容 trace；后续可由 AgentEvent 持久化替代。"""
 
     steps: list[dict] = field(default_factory=list)
 
     def add(self, step_type: str, payload: dict) -> None:
         self.steps.append({"type": step_type, **payload})
+
+
+class _EventFactory:
+    def __init__(self, *, run_id: str, session_id: str) -> None:
+        self.run_id = run_id
+        self.session_id = session_id
+        self.sequence = 0
+
+    def create(self, event_type: str, payload: dict[str, Any] | None = None) -> AgentEvent:
+        self.sequence += 1
+        return AgentEvent(
+            type=event_type,
+            run_id=self.run_id,
+            session_id=self.session_id,
+            sequence=self.sequence,
+            timestamp=time.time(),
+            payload=payload or {},
+        )
 
 
 def _model_tool_calls_to_dicts(tool_calls: tuple[ModelToolCall, ...]) -> list[dict]:
@@ -85,22 +106,15 @@ class Agent:
         self.store = store
         self.config = config or AgentConfig()
         self._on_event = on_event or (lambda _t, _p: None)
-        self.hooks = hooks  # None -> 等价于"没装 hook"，零开销
+        self.hooks = hooks
         self.permission_cfg = permission_cfg or {}
         self.attachment_resolver = attachment_resolver
+        # asyncio 原语绑定事件循环。按 loop 保存锁，支持同步兼容层每次创建新 loop。
+        self._session_locks: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
-    # ---------------- hooks 辅助 ---------------- #
-
-    def _dispatch(self, event_type: str, **kwargs: Any):
-        """便利包装：无 manager 或该事件无 hook 时直接返回 None。"""
-        if self.hooks is None or not self.hooks.has_hooks_for(event_type):
-            return None
-        return self.hooks.dispatch(HookEvent(type=event_type, **kwargs))
-
-    # ---------------- 主入口 ---------------- #
+    # ---------------- 同步兼容入口 ---------------- #
 
     def run(self, session: Session, user_input: str) -> tuple[str, AgentTrace]:
-        """向后兼容的纯文本入口。"""
         return self.run_request(session, AgentRequest.from_text(user_input))
 
     def run_request(
@@ -108,11 +122,123 @@ class Agent:
         session: Session,
         request: AgentRequest,
     ) -> tuple[str, AgentTrace]:
-        """执行一次文本或多模态请求。"""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            result = asyncio.run(self.arun(session, request))
+            return result.content, result.trace
+        raise RuntimeError("当前线程已有事件循环，请使用 await agent.arun(...)")
+
+    # ---------------- 异步公开入口 ---------------- #
+
+    async def arun(
+        self,
+        session: Session,
+        request: AgentRequest | str,
+        *,
+        context: RunContext | None = None,
+    ) -> AgentResult:
+        """收集 astream() 事件并返回最终结果。"""
+        trace = AgentTrace()
+        terminal: AgentEvent | None = None
+        trace_type_map = {
+            "hook_blocked": "hook_blocked",
+            "tool_started": "tool_call",
+            "tool_completed": "tool_result",
+            "llm_error": "llm_error",
+            "run_completed": "final",
+            "max_steps": "max_steps",
+        }
+
+        async for event in self.astream(session, request, context=context):
+            trace_type = trace_type_map.get(event.type)
+            if trace_type is not None:
+                trace.add(trace_type, dict(event.payload))
+            if event.type in {"run_completed", "run_failed", "run_cancelled"}:
+                terminal = event
+
+        if terminal is None:
+            raise RuntimeError("Agent 事件流结束但没有终止事件")
+        status = (
+            terminal.type[len("run_") :]
+            if terminal.type.startswith("run_")
+            else terminal.type
+        )
+        return AgentResult(
+            content=str(terminal.payload.get("content") or ""),
+            run_id=terminal.run_id,
+            status=status,
+            trace=trace,
+        )
+
+    async def astream(
+        self,
+        session: Session,
+        request: AgentRequest | str,
+        *,
+        context: RunContext | None = None,
+    ) -> AsyncIterator[AgentEvent]:
+        """执行一次 Agent 请求并实时产出统一事件。"""
+        normalized = (
+            AgentRequest.from_text(request) if isinstance(request, str) else request
+        )
+        run_context = context or RunContext()
+        factory = _EventFactory(run_id=run_context.run_id, session_id=session.id)
+        lock = self._get_session_lock(session.id)
+
+        async with lock:
+            try:
+                async for event in self._astream_locked(
+                    session,
+                    normalized,
+                    run_context,
+                    factory,
+                ):
+                    self._notify_legacy(event)
+                    yield event
+            except asyncio.CancelledError:
+                event = factory.create(
+                    "run_cancelled",
+                    {"content": "", "reason": "cancelled"},
+                )
+                self._notify_legacy(event)
+                yield event
+                raise
+            except Exception as exc:
+                event = factory.create(
+                    "run_failed",
+                    {
+                        "content": "",
+                        "reason": "internal_error",
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                )
+                self._notify_legacy(event)
+                yield event
+                raise
+
+    # ---------------- 主状态机 ---------------- #
+
+    async def _astream_locked(
+        self,
+        session: Session,
+        request: AgentRequest,
+        context: RunContext,
+        factory: _EventFactory,
+    ) -> AsyncIterator[AgentEvent]:
+        yield factory.create(
+            "run_started",
+            {
+                "episode_id": context.episode_id,
+                "env_idx": context.env_idx,
+                "metadata": dict(context.metadata),
+            },
+        )
+
         user_input = request.text
-        # === Hook 1/4: UserPromptSubmit（user 消息持久化前） ===
         injected_after_user: list[str] = []
-        decision = self._dispatch(
+        decision = await self._adispatch(
             USER_PROMPT_SUBMIT,
             session_id=session.id,
             payload={
@@ -130,50 +256,47 @@ class Agent:
                 injected_after_user.append(decision.inject_context)
             if decision.block:
                 reason = decision.block_reason or "[hook:UserPromptSubmit] 已阻断"
-                # 持久化 user + assistant(=block 提示)，让会话历史可解释
                 user_msg = Message(
                     role="user",
                     content=request.content,
                     metadata=dict(request.metadata),
                 )
-                self.store.append_message(session.id, user_msg)
-                session.append(user_msg)
+                self._persist_message(session, user_msg)
                 blocked_msg = Message(role="assistant", content=text_content(reason))
-                self.store.append_message(session.id, blocked_msg)
-                session.append(blocked_msg)
-                trace = AgentTrace()
-                trace.add("hook_blocked", {"event": USER_PROMPT_SUBMIT, "reason": reason})
-                self._on_event("hook", {"event": USER_PROMPT_SUBMIT, "blocked": True, "reason": reason})
-                return reason, trace
+                self._persist_message(session, blocked_msg)
+                yield factory.create(
+                    "hook_blocked",
+                    {"event": USER_PROMPT_SUBMIT, "reason": reason},
+                )
+                yield factory.create("run_completed", {"content": reason})
+                return
 
-        # 1) 持久化 user 消息
         user_msg = Message(
             role="user",
             content=request.content,
             metadata=dict(request.metadata),
         )
-        self.store.append_message(session.id, user_msg)
-        session.append(user_msg)
+        self._persist_message(session, user_msg)
 
-        # 2) 装配本轮 messages
         messages = self.assembler.assemble(session)
-        # UserPromptSubmit 注入的临时上下文以 system 形式放在 user 之后，仅本轮可见、不持久化
-        for ctx in injected_after_user:
+        for injected in injected_after_user:
             messages.append(
                 {
                     "role": "system",
-                    "content": text_model_content(f"[hook:UserPromptSubmit] {ctx}"),
+                    "content": text_model_content(
+                        f"[hook:UserPromptSubmit] {injected}"
+                    ),
                 }
             )
 
-        trace = AgentTrace()
         model_tools = self.tools.model_tools() or None
         turn_state = None
         delta_messages: list[dict[str, Any]] | None = None
 
         for step in range(self.config.max_steps):
+            yield factory.create("model_started", {"step": step})
             try:
-                response = generate_model_response(
+                response = await agenerate_model_response(
                     self.llm,
                     messages,
                     tools=model_tools,
@@ -184,18 +307,37 @@ class Agent:
                 )
             except LLMCallError as exc:
                 content = _llm_error_message(exc)
-                assistant_msg = Message(role="assistant", content=text_content(content))
-                self.store.append_message(session.id, assistant_msg)
-                session.append(assistant_msg)
-                trace.add("llm_error", {"step": step, "failure": exc.failure.to_dict()})
-                self._on_event("llm_error", {"failure": exc.failure.to_dict()})
-                return content, trace
-            # ---- 终止分支：无 tool_calls，准备返回 ----
+                self._persist_message(
+                    session,
+                    Message(role="assistant", content=text_content(content)),
+                )
+                yield factory.create(
+                    "llm_error",
+                    {
+                        "step": step,
+                        "failure": exc.failure.to_dict(),
+                    },
+                )
+                yield factory.create(
+                    "run_failed",
+                    {
+                        "content": content,
+                        "reason": "llm_error",
+                    },
+                )
+                return
+
+            yield factory.create(
+                "model_completed",
+                {
+                    "step": step,
+                    "tool_call_count": len(response.tool_calls),
+                },
+            )
+
             if not response.tool_calls:
                 content = (response.text or "").strip()
-
-                # === Hook 4/4: Stop ===
-                stop_decision = self._dispatch(
+                stop_decision = await self._adispatch(
                     STOP,
                     session_id=session.id,
                     payload={"final_answer": content, "step": step},
@@ -204,64 +346,71 @@ class Agent:
                     if stop_decision.rewrite_final_answer is not None:
                         content = str(stop_decision.rewrite_final_answer)
                     if stop_decision.block:
-                        # 强制再循环：把 block_reason 作为 system 提示拼进去，让 LLM 改写
-                        reason = stop_decision.block_reason or "[hook:Stop] 请改写你的回答"
-                        nudge = (
-                            f"[hook:Stop] 你刚才的回答被拦截：{reason}。"
-                            "请基于现有上下文重新作答。"
+                        reason = (
+                            stop_decision.block_reason
+                            or "[hook:Stop] 请改写你的回答"
                         )
                         nudge_message = {
                             "role": "system",
-                            "content": text_model_content(nudge),
+                            "content": text_model_content(
+                                f"[hook:Stop] 你刚才的回答被拦截：{reason}。"
+                                "请基于现有上下文重新作答。"
+                            ),
                         }
                         messages.append(nudge_message)
                         turn_state = response.next_turn_state
                         delta_messages = [nudge_message]
-                        trace.add("hook_blocked", {"event": STOP, "reason": reason, "step": step})
-                        self._on_event("hook", {"event": STOP, "blocked": True, "reason": reason})
+                        yield factory.create(
+                            "hook_blocked",
+                            {
+                                "event": STOP,
+                                "reason": reason,
+                                "step": step,
+                            },
+                        )
                         continue
 
-                assistant_msg = Message(role="assistant", content=text_content(content))
-                self.store.append_message(session.id, assistant_msg)
-                session.append(assistant_msg)
-                trace.add("final", {"step": step, "content": content})
-                self._on_event("final", {"content": content})
-                return content, trace
+                self._persist_message(
+                    session,
+                    Message(role="assistant", content=text_content(content)),
+                )
+                yield factory.create(
+                    "run_completed",
+                    {"content": content, "step": step},
+                )
+                return
 
-            # ---- tool_calls 分支 ----
-            tool_calls_dicts = _model_tool_calls_to_dicts(response.tool_calls)
             assistant_msg = Message(
                 role="assistant",
                 content=text_content(response.text or ""),
-                tool_calls=tool_calls_dicts,
+                tool_calls=_model_tool_calls_to_dicts(response.tool_calls),
                 reasoning=response.reasoning,
             )
-            self.store.append_message(session.id, assistant_msg)
-            session.append(assistant_msg)
-
+            self._persist_message(session, assistant_msg)
             messages.append(assistant_msg.to_model_dict())
 
             tool_result_messages: list[dict[str, Any]] = []
+            # 第一阶段保持确定性的串行执行；后续由 ToolExecutionPolicy 控制并发。
             for tc in response.tool_calls:
                 name = tc.name
                 args = dict(tc.arguments)
-
-                # === Hook 2/4: PreToolUse ===
                 desc = None
                 get_desc = getattr(self.tools, "get_tool_descriptor", None)
                 if callable(get_desc):
                     desc = get_desc(name)
                 trust_level = getattr(desc, "trust_level", "untrusted")
 
-                interaction_mode = "interactive"
+                interaction_mode = "non_interactive"
                 try:
-                    import sys as _sys
+                    import sys
 
-                    interaction_mode = "interactive" if _sys.stdin.isatty() else "non_interactive"
+                    interaction_mode = (
+                        "interactive" if sys.stdin.isatty() else "non_interactive"
+                    )
                 except Exception:
-                    interaction_mode = "non_interactive"
+                    pass
 
-                pre_decision = self._dispatch(
+                pre_decision = await self._adispatch(
                     PRE_TOOL_USE,
                     session_id=session.id,
                     matcher_target=name,
@@ -272,13 +421,14 @@ class Agent:
                     },
                     meta={
                         "trust_policy": dict(
-                            (self.permission_cfg.get("trust_policy") or {})
+                            self.permission_cfg.get("trust_policy") or {}
                         ),
                         "mcp_rules": dict(
-                            (self.permission_cfg.get("mcp_rules") or {})
+                            self.permission_cfg.get("mcp_rules") or {}
                         ),
                         "non_interactive_fallback": str(
-                            self.permission_cfg.get("non_interactive_fallback") or "deny"
+                            self.permission_cfg.get("non_interactive_fallback")
+                            or "deny"
                         ),
                         "interaction_mode": interaction_mode,
                     },
@@ -287,42 +437,47 @@ class Agent:
                     if pre_decision.rewrite_params is not None:
                         args = dict(pre_decision.rewrite_params)
                     if pre_decision.block:
-                        reason = pre_decision.block_reason or "[hook:PreToolUse] 已阻断"
+                        reason = (
+                            pre_decision.block_reason
+                            or "[hook:PreToolUse] 已阻断"
+                        )
                         result = f"[ToolError:{name}][BLOCKED] {reason}"
-                        self._on_event(
-                            "hook",
-                            {"event": PRE_TOOL_USE, "tool": name, "blocked": True, "reason": reason},
-                        )
-                        trace.add("tool_call", {"step": step, "name": name, "args": args})
-                        trace.add(
+                        yield factory.create(
                             "hook_blocked",
-                            {"event": PRE_TOOL_USE, "tool": name, "reason": reason, "step": step},
+                            {
+                                "event": PRE_TOOL_USE,
+                                "tool": name,
+                                "reason": reason,
+                                "step": step,
+                            },
                         )
-                        tool_msg = Message(
-                            role="tool",
-                            content=text_content(result),
-                            tool_call_id=tc.id,
+                        tool_message = self._persist_tool_result(
+                            session,
+                            call_id=tc.id,
                             name=name,
+                            result=result,
                         )
-                        self.store.append_message(session.id, tool_msg)
-                        session.append(tool_msg)
-                        tool_message = tool_msg.to_model_dict()
                         messages.append(tool_message)
                         tool_result_messages.append(tool_message)
                         continue
 
-                self._on_event("tool_call", {"name": name, "args": args})
-                trace.add("tool_call", {"step": step, "name": name, "args": args})
-
-                started_ms = int(time.time() * 1000)
+                yield factory.create(
+                    "tool_started",
+                    {
+                        "step": step,
+                        "call_id": tc.id,
+                        "name": name,
+                        "args": args,
+                    },
+                )
+                started = time.monotonic()
                 try:
-                    result = self.tools.call(name, args)
+                    result = await self._acall_tool(name, args)
                 except Exception as exc:
                     result = _tool_error_payload(name, exc)
-                latency_ms = int(time.time() * 1000) - started_ms
+                latency_ms = int((time.monotonic() - started) * 1000)
 
-                # === Hook 3/4: PostToolUse ===
-                post_decision = self._dispatch(
+                post_decision = await self._adispatch(
                     POST_TOOL_USE,
                     session_id=session.id,
                     matcher_target=name,
@@ -334,29 +489,123 @@ class Agent:
                     },
                 )
                 if post_decision is not None and post_decision.inject_context:
-                    result = f"{result}\n\n[hook:PostToolUse] {post_decision.inject_context}"
+                    result = (
+                        f"{result}\n\n"
+                        f"[hook:PostToolUse] {post_decision.inject_context}"
+                    )
 
-                self._on_event("tool_result", {"name": name, "result": result})
-                trace.add("tool_result", {"step": step, "name": name, "result": result})
-
-                tool_msg = Message(
-                    role="tool",
-                    content=text_content(result),
-                    tool_call_id=tc.id,
-                    name=name,
+                yield factory.create(
+                    "tool_completed",
+                    {
+                        "step": step,
+                        "call_id": tc.id,
+                        "name": name,
+                        "result": result,
+                        "latency_ms": latency_ms,
+                    },
                 )
-                self.store.append_message(session.id, tool_msg)
-                session.append(tool_msg)
-                tool_message = tool_msg.to_model_dict()
+                tool_message = self._persist_tool_result(
+                    session,
+                    call_id=tc.id,
+                    name=name,
+                    result=result,
+                )
                 messages.append(tool_message)
                 tool_result_messages.append(tool_message)
 
             turn_state = response.next_turn_state
             delta_messages = tool_result_messages
 
-        msg_text = f"[已达到最大步数 {self.config.max_steps}，提前结束]"
-        trace.add("max_steps", {"content": msg_text})
-        return msg_text, trace
+        content = f"[已达到最大步数 {self.config.max_steps}，提前结束]"
+        yield factory.create("max_steps", {"content": content})
+        yield factory.create(
+            "run_failed",
+            {
+                "content": content,
+                "reason": "max_steps_exceeded",
+            },
+        )
+
+    # ---------------- 辅助方法 ---------------- #
+
+    def _get_session_lock(self, session_id: str) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        locks = self._session_locks.get(loop)
+        if locks is None:
+            locks = {}
+            self._session_locks[loop] = locks
+        lock = locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[session_id] = lock
+        return lock
+
+    async def _adispatch(self, event_type: str, **kwargs: Any):
+        if self.hooks is None or not self.hooks.has_hooks_for(event_type):
+            return None
+        loop = asyncio.get_running_loop()
+        call = functools.partial(
+            self.hooks.dispatch,
+            HookEvent(type=event_type, **kwargs),
+        )
+        return await loop.run_in_executor(None, call)
+
+    async def _acall_tool(self, name: str, args: dict[str, Any]) -> str:
+        acall = getattr(self.tools, "acall", None)
+        if callable(acall):
+            return await acall(name, args)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            functools.partial(self.tools.call, name, args),
+        )
+
+    def _persist_message(self, session: Session, message: Message) -> None:
+        # SQLite Store 仍是同步边界；下一阶段会改为单 writer queue。
+        self.store.append_message(session.id, message)
+        session.append(message)
+
+    def _persist_tool_result(
+        self,
+        session: Session,
+        *,
+        call_id: str,
+        name: str,
+        result: str,
+    ) -> dict[str, Any]:
+        tool_msg = Message(
+            role="tool",
+            content=text_content(result),
+            tool_call_id=call_id,
+            name=name,
+        )
+        self._persist_message(session, tool_msg)
+        return tool_msg.to_model_dict()
+
+    def _notify_legacy(self, event: AgentEvent) -> None:
+        payload = dict(event.payload)
+        if event.type == "tool_started":
+            self._on_event(
+                "tool_call",
+                {
+                    "name": payload.get("name"),
+                    "args": payload.get("args"),
+                },
+            )
+        elif event.type == "tool_completed":
+            self._on_event(
+                "tool_result",
+                {
+                    "name": payload.get("name"),
+                    "result": payload.get("result"),
+                },
+            )
+        elif event.type == "run_completed":
+            self._on_event("final", {"content": payload.get("content", "")})
+        elif event.type == "llm_error":
+            self._on_event("llm_error", payload)
+        elif event.type == "hook_blocked":
+            self._on_event("hook", {**payload, "blocked": True})
 
 
 def _llm_error_message(exc: LLMCallError) -> str:

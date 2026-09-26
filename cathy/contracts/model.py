@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
+from typing import Any, AsyncIterator, Mapping, Protocol, Sequence, runtime_checkable
 
 from .content import AttachmentResolver
 
@@ -70,6 +70,16 @@ class ModelResponse:
     raw: Any = field(default=None, repr=False, compare=False)
 
 
+@dataclass(frozen=True)
+class ModelEvent:
+    """模型流事件；provider adapter 负责把供应商事件归一化到该结构。"""
+
+    type: str
+    text: str = ""
+    response: ModelResponse | None = None
+    raw: Any = field(default=None, repr=False, compare=False)
+
+
 @runtime_checkable
 class ModelClient(Protocol):
     """CathyAgent 所依赖的最小模型客户端协议。"""
@@ -78,3 +88,16 @@ class ModelClient(Protocol):
 
     def generate(self, request: ModelRequest) -> ModelResponse:
         """生成一轮归一化模型输出。"""
+
+
+@runtime_checkable
+class AsyncModelClient(Protocol):
+    """原生异步模型客户端协议；同步客户端由调用适配层在线程池中兼容。"""
+
+    model: str
+
+    async def agenerate(self, request: ModelRequest) -> ModelResponse:
+        """异步生成一轮归一化模型输出。"""
+
+    def astream(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        """流式生成归一化模型事件。"""
