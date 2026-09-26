@@ -31,6 +31,18 @@ _MANIFEST_SCHEMA: dict[str, Any] = {
                     "description": {"type": "string"},
                     "input_schema": {"type": "object"},
                     "output_schema": {"type": "object"},
+                    "execution_mode": {
+                        "type": "string",
+                        "enum": ["inline", "background"],
+                    },
+                    "timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
+                    "cancellable": {"type": "boolean"},
+                    "side_effect": {
+                        "type": "string",
+                        "enum": ["none", "reversible", "irreversible"],
+                    },
+                    "concurrency_key": {"type": "string", "minLength": 1},
+                    "max_concurrency": {"type": "integer", "minimum": 1},
                 },
             },
         },
@@ -66,6 +78,12 @@ class ToolSpec:
     description: str
     input_schema: dict[str, Any]
     output_schema: dict[str, Any] | None = None
+    execution_mode: str = "inline"
+    timeout_seconds: float | None = None
+    cancellable: bool = True
+    side_effect: str = "none"
+    concurrency_key: str | None = None
+    max_concurrency: int = 1
 
 
 @dataclass(frozen=True)
@@ -123,6 +141,20 @@ def parse_manifest(manifest_path: Path) -> PluginManifest:
             description=t["description"],
             input_schema=t["input_schema"],
             output_schema=t.get("output_schema"),
+            execution_mode=str(t.get("execution_mode", "inline")),
+            timeout_seconds=(
+                float(t["timeout_seconds"])
+                if t.get("timeout_seconds") is not None
+                else None
+            ),
+            cancellable=bool(t.get("cancellable", True)),
+            side_effect=str(t.get("side_effect", "none")),
+            concurrency_key=(
+                str(t["concurrency_key"])
+                if t.get("concurrency_key") is not None
+                else None
+            ),
+            max_concurrency=int(t.get("max_concurrency", 1)),
         )
         for t in tools_raw
     ]

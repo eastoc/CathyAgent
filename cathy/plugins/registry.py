@@ -15,7 +15,7 @@ from typing import Any, Iterable
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 
-from ..contracts import ModelTool
+from ..contracts import ModelTool, ToolExecutionPolicy, ToolResult
 from ..logger import get_logger
 from .base import PluginError, ToolPlugin
 from .manifest import LoadedPlugin, PluginManifest, ToolSpec, parse_manifest
@@ -126,6 +126,7 @@ class PluginRegistry:
                         name=tool.name,
                         description=tool.description,
                         input_schema=tool.input_schema,
+                        async_execution=tool.execution_mode == "background",
                     )
                 )
         return tools
@@ -146,7 +147,13 @@ class PluginRegistry:
             return f"[ToolError:{tool_name}] 参数不合法 @ {path}: {exc.message}"
 
         try:
-            return loaded.instance.execute(tool_name, params)
+            result = loaded.instance.execute(tool_name, params)
+            if isinstance(result, ToolResult):
+                return result.with_identity(
+                    call_id=result.call_id,
+                    tool_name=tool_name,
+                ).text
+            return str(result)
         except PluginError as exc:
             return f"[ToolError:{tool_name}] {exc}"
         except TypeError as exc:
@@ -155,10 +162,27 @@ class PluginRegistry:
             return f"[ToolError:{tool_name}] {type(exc).__name__}: {exc}"
 
     async def acall(self, tool_name: str, params: dict[str, Any]) -> str:
-        """异步调度工具；参数校验和错误格式与同步 call 一致。"""
+        """旧字符串接口；新代码优先使用 acall_result。"""
+
+        return (await self.acall_result(tool_name, params)).text
+
+    async def acall_result(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        *,
+        call_id: str = "",
+    ) -> ToolResult:
+        """异步执行并把旧字符串插件归一化为 ToolResult。"""
+
         plugin_name = self._tool_index.get(tool_name)
         if plugin_name is None:
-            return f"[ToolError] 未知工具: {tool_name}"
+            return ToolResult.failed(
+                call_id=call_id,
+                tool_name=tool_name,
+                message=f"未知工具: {tool_name}",
+                error_code="unknown_tool",
+            )
 
         loaded = self._loaded[plugin_name]
         tool_spec = loaded.tool_index[tool_name]
@@ -166,16 +190,65 @@ class PluginRegistry:
             Draft202012Validator(tool_spec.input_schema).validate(params)
         except ValidationError as exc:
             path = ".".join(str(x) for x in exc.absolute_path) or "<root>"
-            return f"[ToolError:{tool_name}] 参数不合法 @ {path}: {exc.message}"
+            return ToolResult.failed(
+                call_id=call_id,
+                tool_name=tool_name,
+                message=f"参数不合法 @ {path}: {exc.message}",
+                error_code="invalid_arguments",
+            )
 
         try:
-            return await loaded.instance.aexecute(tool_name, params)
+            result = await loaded.instance.aexecute(tool_name, params)
+            if isinstance(result, ToolResult):
+                return result.with_identity(call_id=call_id, tool_name=tool_name)
+            return ToolResult.succeeded(
+                call_id=call_id,
+                tool_name=tool_name,
+                content=str(result),
+            )
         except PluginError as exc:
-            return f"[ToolError:{tool_name}] {exc}"
+            return ToolResult.failed(
+                call_id=call_id,
+                tool_name=tool_name,
+                message=str(exc),
+                error_code="plugin_error",
+            )
         except TypeError as exc:
-            return f"[ToolError:{tool_name}] 参数不合法: {exc}"
+            return ToolResult.failed(
+                call_id=call_id,
+                tool_name=tool_name,
+                message=f"参数不合法: {exc}",
+                error_code="invalid_arguments",
+            )
         except Exception as exc:
-            return f"[ToolError:{tool_name}] {type(exc).__name__}: {exc}"
+            return ToolResult.failed(
+                call_id=call_id,
+                tool_name=tool_name,
+                message=f"{type(exc).__name__}: {exc}",
+                error_code="unhandled_exception",
+            )
+
+    def get_execution_policy(self, tool_name: str) -> ToolExecutionPolicy | None:
+        """返回工具的调度策略；未知工具返回 None。"""
+
+        plugin_name = self._tool_index.get(tool_name)
+        if plugin_name is None:
+            return None
+        loaded = self._loaded[plugin_name]
+        spec = loaded.tool_index[tool_name]
+        timeout_seconds = (
+            spec.timeout_seconds
+            if spec.timeout_seconds is not None
+            else float(loaded.manifest.execution.timeout_seconds)
+        )
+        return ToolExecutionPolicy(
+            mode=spec.execution_mode,  # type: ignore[arg-type]
+            timeout_seconds=timeout_seconds,
+            cancellable=spec.cancellable,
+            side_effect=spec.side_effect,  # type: ignore[arg-type]
+            concurrency_key=spec.concurrency_key,
+            max_concurrency=spec.max_concurrency,
+        )
 
     # -------- 观测 / 调试接口 -------- #
 
@@ -312,6 +385,31 @@ class ToolView:
         if not self._is_visible(tool_name):
             return f"[ToolError:{tool_name}] 此工具不在 subagent 白名单内"
         return await self._registry.acall(tool_name, params)
+
+    async def acall_result(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        *,
+        call_id: str = "",
+    ) -> ToolResult:
+        if not self._is_visible(tool_name):
+            return ToolResult.failed(
+                call_id=call_id,
+                tool_name=tool_name,
+                message="此工具不在 subagent 白名单内",
+                error_code="tool_not_visible",
+            )
+        return await self._registry.acall_result(
+            tool_name,
+            params,
+            call_id=call_id,
+        )
+
+    def get_execution_policy(self, tool_name: str) -> ToolExecutionPolicy | None:
+        if not self._is_visible(tool_name):
+            return None
+        return self._registry.get_execution_policy(tool_name)
 
     def list_tools(self) -> list[ToolDescriptor]:
         return [d for d in self._registry.list_tools() if self._is_visible(d.name)]

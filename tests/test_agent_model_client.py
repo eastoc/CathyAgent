@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import tempfile
 import unittest
@@ -36,6 +37,27 @@ class _EchoPlugin(ToolPlugin):
 
     def execute(self, tool_name: str, params: dict[str, Any]) -> str:
         return f"echo:{params.get('msg', '')}"
+
+
+class _ConcurrentPlugin(ToolPlugin):
+    def __init__(self) -> None:
+        self.active = 0
+        self.max_active = 0
+
+    def initialize(self, config: dict[str, Any]) -> None:
+        return None
+
+    def execute(self, tool_name: str, params: dict[str, Any]) -> str:
+        raise AssertionError("Agent 应使用原生异步工具入口")
+
+    async def aexecute(self, tool_name: str, params: dict[str, Any]) -> str:
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            await asyncio.sleep(0.03)
+            return f"{tool_name}:{params['value']}"
+        finally:
+            self.active -= 1
 
 
 class _ScriptedModelClient:
@@ -80,7 +102,79 @@ def _registry() -> PluginRegistry:
     return registry
 
 
+def _concurrent_registry(plugin: _ConcurrentPlugin) -> PluginRegistry:
+    registry = PluginRegistry(plugins_dirs=[])
+    registry.register_internal_plugin(
+        PluginManifest(
+            name="concurrent",
+            version="0.0.1",
+            description="concurrent tools",
+            tools=[
+                ToolSpec(
+                    name=name,
+                    description=name,
+                    input_schema={
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                        "required": ["value"],
+                    },
+                )
+                for name in ("first", "second")
+            ],
+            permissions={},
+            execution=Execution(runtime="python", entrypoint="<internal>:Concurrent"),
+            metadata={"trust_level": "builtin"},
+            source_dir=Path(__file__).parent,
+        ),
+        plugin,
+    )
+    return registry
+
+
 class AgentModelClientTest(unittest.TestCase):
+    def test_multiple_tool_calls_run_concurrently_and_preserve_message_order(self) -> None:
+        plugin = _ConcurrentPlugin()
+        model = _ScriptedModelClient(
+            [
+                ModelResponse(
+                    tool_calls=(
+                        ModelToolCall(
+                            id="call_1",
+                            name="first",
+                            arguments={"value": "one"},
+                        ),
+                        ModelToolCall(
+                            id="call_2",
+                            name="second",
+                            arguments={"value": "two"},
+                        ),
+                    )
+                ),
+                ModelResponse(text="完成"),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            store = SessionStore(Path(td) / "session.db")
+            session = store.create()
+            agent = Agent(
+                llm=model,
+                tools=_concurrent_registry(plugin),
+                assembler=ContextAssembler(token_budget=4096),
+                store=store,
+            )
+
+            answer, _trace = agent.run(session, "并行执行")
+            store.close()
+
+        self.assertEqual(answer, "完成")
+        self.assertEqual(plugin.max_active, 2)
+        assert model.requests[1].delta_messages is not None
+        self.assertEqual(
+            [message["tool_call_id"] for message in model.requests[1].delta_messages],
+            ["call_1", "call_2"],
+        )
+
     def test_run_request_passes_neutral_multimodal_content(self) -> None:
         model = _ScriptedModelClient([ModelResponse(text="看到了")])
         ref = AttachmentRef(

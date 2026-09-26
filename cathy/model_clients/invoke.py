@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import functools
-from typing import Any, Sequence
+from typing import Any, AsyncIterator, Sequence
 
 from ..contracts import (
     AttachmentResolver,
+    ModelEvent,
     ModelRequest,
     ModelResponse,
     ModelTool,
@@ -110,3 +111,46 @@ async def agenerate_model_response(
         attachment_resolver=attachment_resolver,
     )
     return await loop.run_in_executor(None, call)
+
+
+async def astream_model_response(
+    llm: Any,
+    messages: Sequence[dict[str, Any]],
+    *,
+    tools: Sequence[ModelTool] | None = None,
+    tool_choice: str | None = "auto",
+    stage: str,
+    turn_state: ModelTurnState | None = None,
+    delta_messages: Sequence[dict[str, Any]] | None = None,
+    attachment_resolver: AttachmentResolver | None = None,
+) -> AsyncIterator[ModelEvent]:
+    """优先转发原生模型流，否则把一次完整生成合成为标准事件流。"""
+    request = ModelRequest(
+        messages=messages,
+        tools=tools,
+        tool_choice=tool_choice,
+        stage=stage,
+        turn_state=turn_state,
+        delta_messages=delta_messages,
+        attachment_resolver=attachment_resolver,
+    )
+    astream = getattr(llm, "astream", None)
+    if callable(astream):
+        async for event in astream(request):
+            yield event
+        return
+
+    yield ModelEvent(type="response_started")
+    response = await agenerate_model_response(
+        llm,
+        messages,
+        tools=tools,
+        tool_choice=tool_choice,
+        stage=stage,
+        turn_state=turn_state,
+        delta_messages=delta_messages,
+        attachment_resolver=attachment_resolver,
+    )
+    if response.text:
+        yield ModelEvent(type="text_delta", text=response.text)
+    yield ModelEvent(type="response_completed", response=response)

@@ -35,6 +35,23 @@ class _RetryableServerError(Exception):
     status_code = 500
 
 
+class _AsyncStream:
+    def __init__(self, events: list[object]) -> None:
+        self._events = list(events)
+        self.closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._events:
+            raise StopAsyncIteration
+        return self._events.pop(0)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 class OpenAIResponsesClientTest(unittest.TestCase):
     @patch("cathy.model_clients.openai_responses.AsyncOpenAI")
     @patch("cathy.model_clients.openai_responses.OpenAI")
@@ -63,6 +80,99 @@ class OpenAIResponsesClientTest(unittest.TestCase):
 
         self.assertEqual(response.text, "异步完成")
         async_openai_cls.return_value.responses.create.assert_awaited_once()
+
+    @patch("cathy.model_clients.openai_responses.AsyncOpenAI")
+    @patch("cathy.model_clients.openai_responses.OpenAI")
+    def test_astream_normalizes_responses_events(
+        self,
+        _openai_cls: MagicMock,
+        async_openai_cls: MagicMock,
+    ) -> None:
+        completed_response = SimpleNamespace(
+            id="resp_stream",
+            output_text="任务完成",
+            output=[
+                SimpleNamespace(
+                    type="function_call",
+                    call_id="call_1",
+                    id="fc_1",
+                    name="echo",
+                    arguments='{"msg":"hi"}',
+                )
+            ],
+        )
+        stream = _AsyncStream(
+            [
+                SimpleNamespace(type="response.created"),
+                SimpleNamespace(
+                    type="response.output_text.delta",
+                    delta="任务",
+                ),
+                SimpleNamespace(
+                    type="response.output_text.delta",
+                    delta="完成",
+                ),
+                SimpleNamespace(
+                    type="response.output_item.added",
+                    output_index=1,
+                    item=SimpleNamespace(
+                        type="function_call",
+                        call_id="call_1",
+                        name="echo",
+                    ),
+                ),
+                SimpleNamespace(
+                    type="response.function_call_arguments.delta",
+                    item_id="call_1",
+                    output_index=1,
+                    delta='{"msg":"hi"}',
+                ),
+                SimpleNamespace(
+                    type="response.completed",
+                    response=completed_response,
+                ),
+            ]
+        )
+        async_openai_cls.return_value.responses.create = AsyncMock(return_value=stream)
+        client = OpenAIResponsesClient(
+            api_key="test-key",
+            base_url="https://api.openai.com/v1",
+        )
+
+        async def collect():
+            return [
+                event
+                async for event in client.astream(
+                    ModelRequest(messages=[{"role": "user", "content": "执行任务"}])
+                )
+            ]
+
+        events = asyncio.run(collect())
+
+        self.assertEqual(
+            [event.type for event in events],
+            [
+                "response_started",
+                "text_delta",
+                "text_delta",
+                "tool_call_started",
+                "tool_call_delta",
+                "response_completed",
+            ],
+        )
+        self.assertEqual(
+            "".join(event.text for event in events),
+            '任务完成{"msg":"hi"}',
+        )
+        self.assertEqual(events[3].metadata["call_id"], "call_1")
+        final = events[-1].response
+        self.assertIsNotNone(final)
+        assert final is not None
+        self.assertEqual(final.text, "任务完成")
+        self.assertEqual(final.tool_calls[0].arguments, {"msg": "hi"})
+        kwargs = async_openai_cls.return_value.responses.create.call_args.kwargs
+        self.assertTrue(kwargs["stream"])
+        self.assertTrue(stream.closed)
 
     @patch("cathy.model_clients.openai_responses.OpenAI")
     def test_generate_uses_astra_responses_parameters(self, openai_cls: MagicMock) -> None:
@@ -110,6 +220,7 @@ class OpenAIResponsesClientTest(unittest.TestCase):
                     call_id="call_1",
                     name="move_arm",
                     arguments='{"x": 0.2}',
+                    async_=True,
                 )
             ],
         )
@@ -129,6 +240,7 @@ class OpenAIResponsesClientTest(unittest.TestCase):
                             "type": "object",
                             "properties": {"x": {"type": "number"}},
                         },
+                        async_execution=True,
                     )
                 ],
             )
@@ -137,9 +249,11 @@ class OpenAIResponsesClientTest(unittest.TestCase):
         self.assertEqual(response.tool_calls[0].id, "call_1")
         self.assertEqual(response.tool_calls[0].name, "move_arm")
         self.assertEqual(response.tool_calls[0].arguments, {"x": 0.2})
+        self.assertTrue(response.tool_calls[0].async_execution)
         tool = openai_cls.return_value.responses.create.call_args.kwargs["tools"][0]
         self.assertEqual(tool["type"], "function")
         self.assertEqual(tool["name"], "move_arm")
+        self.assertTrue(tool["async"])
         self.assertNotIn("function", tool)
 
     @patch("cathy.model_clients.openai_responses.OpenAI")

@@ -19,6 +19,7 @@ class ModelTool:
     description: str
     input_schema: Mapping[str, Any]
     strict: bool | None = None
+    async_execution: bool = False
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ class ModelToolCall:
     name: str
     arguments: Mapping[str, Any]
     raw_arguments: str = "{}"
+    async_execution: bool = False
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,7 @@ class ModelEvent:
 
     type: str
     text: str = ""
+    metadata: Mapping[str, Any] = field(default_factory=dict)
     response: ModelResponse | None = None
     raw: Any = field(default=None, repr=False, compare=False)
 

@@ -1,8 +1,4 @@
-"""SessionStore：基于 SQLite 的会话持久化。
-
-两张表：sessions / messages（不持久化 system 消息）。
-所有写操作即时提交，避免崩溃丢数据。
-"""
+"""SessionStore：持久化会话、消息和后台工具任务。"""
 
 from __future__ import annotations
 
@@ -13,6 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from ..contracts.content import deserialize_content_blocks, serialize_content_blocks
+from ..contracts.tool import (
+    ToolInvocation,
+    ToolTaskRecord,
+    tool_result_from_dict,
+    tool_result_to_dict,
+)
 from .models import Message, Session, new_session_id
 
 _SCHEMA = """
@@ -38,6 +40,32 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages (session_id, id);
+
+CREATE TABLE IF NOT EXISTS tool_tasks (
+    task_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    provider TEXT,
+    provider_call_id TEXT,
+    provider_response_id TEXT,
+    latest_response_id TEXT,
+    tool_name TEXT NOT NULL,
+    arguments_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    result_json TEXT,
+    error_message TEXT,
+    created_at REAL NOT NULL,
+    started_at REAL,
+    finished_at REAL,
+    updated_at REAL NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_tasks_run ON tool_tasks (run_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_tool_tasks_status ON tool_tasks (status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_tool_tasks_provider_call
+    ON tool_tasks (provider, provider_call_id);
 """
 
 
@@ -163,6 +191,137 @@ class SessionStore:
                 )
             )
         return out
+
+    # ---------- Background Tool Task CRUD ---------- #
+
+    def create_tool_task(self, task: ToolTaskRecord) -> None:
+        try:
+            self._conn.execute(
+                "INSERT INTO tool_tasks "
+                "(task_id, run_id, session_id, provider, provider_call_id, "
+                "provider_response_id, latest_response_id, tool_name, "
+                "arguments_json, status, result_json, error_message, "
+                "created_at, started_at, finished_at, updated_at, metadata_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                self._tool_task_values(task),
+            )
+            self._conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"工具任务无法创建或已存在: {task.task_id}") from exc
+
+    def update_tool_task(self, task: ToolTaskRecord) -> None:
+        values = self._tool_task_values(task)
+        cursor = self._conn.execute(
+            "UPDATE tool_tasks SET "
+            "run_id = ?, session_id = ?, provider = ?, provider_call_id = ?, "
+            "provider_response_id = ?, latest_response_id = ?, tool_name = ?, "
+            "arguments_json = ?, status = ?, result_json = ?, error_message = ?, "
+            "created_at = ?, started_at = ?, finished_at = ?, updated_at = ?, "
+            "metadata_json = ? WHERE task_id = ?",
+            (*values[1:], values[0]),
+        )
+        if cursor.rowcount == 0:
+            raise KeyError(f"工具任务不存在: {task.task_id}")
+        self._conn.commit()
+
+    def load_tool_task(self, task_id: str) -> ToolTaskRecord | None:
+        row = self._conn.execute(
+            "SELECT * FROM tool_tasks WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        return self._tool_task_from_row(row) if row is not None else None
+
+    def list_tool_tasks(
+        self,
+        *,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        statuses: tuple[str, ...] | None = None,
+        limit: int = 100,
+    ) -> list[ToolTaskRecord]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if statuses:
+            placeholders = ", ".join("?" for _ in statuses)
+            clauses.append(f"status IN ({placeholders})")
+            params.extend(statuses)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM tool_tasks{where} "
+            "ORDER BY created_at ASC LIMIT ?",
+            (*params, max(1, int(limit))),
+        ).fetchall()
+        return [self._tool_task_from_row(row) for row in rows]
+
+    @staticmethod
+    def _tool_task_values(task: ToolTaskRecord) -> tuple[Any, ...]:
+        return (
+            task.task_id,
+            task.run_id,
+            task.session_id,
+            task.provider,
+            task.provider_call_id,
+            task.provider_response_id,
+            task.latest_response_id,
+            task.invocation.name,
+            json.dumps(task.invocation.arguments, ensure_ascii=False, sort_keys=True),
+            task.status,
+            (
+                json.dumps(
+                    tool_result_to_dict(task.result),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                if task.result is not None
+                else None
+            ),
+            task.error_message,
+            task.created_at,
+            task.started_at,
+            task.finished_at,
+            task.updated_at,
+            json.dumps(task.metadata, ensure_ascii=False, sort_keys=True),
+        )
+
+    @staticmethod
+    def _tool_task_from_row(row: sqlite3.Row) -> ToolTaskRecord:
+        raw_result = json.loads(row["result_json"]) if row["result_json"] else None
+        return ToolTaskRecord(
+            task_id=row["task_id"],
+            run_id=row["run_id"],
+            session_id=row["session_id"],
+            invocation=ToolInvocation(
+                call_id=row["provider_call_id"] or row["task_id"],
+                name=row["tool_name"],
+                arguments=json.loads(row["arguments_json"] or "{}"),
+            ),
+            status=row["status"],
+            provider=row["provider"],
+            provider_call_id=row["provider_call_id"],
+            provider_response_id=row["provider_response_id"],
+            latest_response_id=row["latest_response_id"],
+            result=(tool_result_from_dict(raw_result) if raw_result is not None else None),
+            error_message=row["error_message"],
+            created_at=float(row["created_at"]),
+            started_at=(
+                float(row["started_at"])
+                if row["started_at"] is not None
+                else None
+            ),
+            finished_at=(
+                float(row["finished_at"])
+                if row["finished_at"] is not None
+                else None
+            ),
+            updated_at=float(row["updated_at"]),
+            metadata=json.loads(row["metadata_json"] or "{}"),
+        )
 
     # ---------- 杂项 ---------- #
 

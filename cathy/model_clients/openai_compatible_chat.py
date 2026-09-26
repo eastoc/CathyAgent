@@ -7,14 +7,16 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, AsyncIterator, Mapping, Sequence
 
 from openai import AsyncOpenAI, OpenAI
 
 from ..contracts import (
     AttachmentResolver,
+    ModelEvent,
     ModelRequest,
     ModelResponse,
     ModelTool,
@@ -134,6 +136,90 @@ class OpenAICompatibleChatClient:
         response = await self._acreate_with_retry(kwargs, stage=request.stage)
         return normalize_chat_response(response)
 
+    async def astream(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        """流式执行 Chat Completions 并归一化文本及工具调用增量。"""
+        kwargs = self._build_request_kwargs(request)
+        kwargs["stream"] = True
+        stream = await self._acreate_with_retry(kwargs, stage=request.stage)
+        text_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_calls: dict[int, dict[str, str]] = {}
+        last_chunk: Any = None
+
+        yield ModelEvent(type="response_started")
+        try:
+            async for chunk in stream:
+                last_chunk = chunk
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+                delta = getattr(choices[0], "delta", None)
+                if delta is None:
+                    continue
+
+                content = getattr(delta, "content", None)
+                if content:
+                    text = str(content)
+                    text_parts.append(text)
+                    yield ModelEvent(type="text_delta", text=text, raw=chunk)
+
+                reasoning = getattr(delta, "reasoning_content", None)
+                if reasoning:
+                    reasoning_text = str(reasoning)
+                    reasoning_parts.append(reasoning_text)
+                    yield ModelEvent(
+                        type="reasoning_delta",
+                        text=reasoning_text,
+                        raw=chunk,
+                    )
+
+                for tool_delta in getattr(delta, "tool_calls", None) or []:
+                    index = int(getattr(tool_delta, "index", 0) or 0)
+                    state = tool_calls.setdefault(
+                        index,
+                        {"id": "", "name": "", "arguments": ""},
+                    )
+                    call_id = getattr(tool_delta, "id", None)
+                    if call_id:
+                        state["id"] = str(call_id)
+                    function = getattr(tool_delta, "function", None)
+                    name_delta = getattr(function, "name", None)
+                    arguments_delta = getattr(function, "arguments", None)
+                    if name_delta:
+                        state["name"] += str(name_delta)
+                    if arguments_delta:
+                        state["arguments"] += str(arguments_delta)
+                    yield ModelEvent(
+                        type="tool_call_delta",
+                        text=str(arguments_delta or ""),
+                        metadata={
+                            "index": index,
+                            "call_id": state["id"],
+                            "name": state["name"],
+                        },
+                        raw=chunk,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except LLMCallError:
+            raise
+        except Exception as exc:
+            failure = classify_llm_exception(exc, stage=request.stage, attempts=1)
+            raise LLMCallError(failure) from exc
+        finally:
+            await _close_async_stream(stream)
+
+        response = ModelResponse(
+            text="".join(text_parts),
+            tool_calls=tuple(
+                _model_tool_call_from_stream(state)
+                for _, state in sorted(tool_calls.items())
+            ),
+            reasoning="".join(reasoning_parts) or None,
+            raw=last_chunk,
+        )
+        yield ModelEvent(type="response_completed", response=response)
+
     def _build_request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -209,6 +295,39 @@ class OpenAICompatibleChatClient:
         delay = min(delay, self.retry_backoff_max_sec)
         if delay > 0:
             await asyncio.sleep(delay)
+
+    def close(self) -> None:
+        """关闭同步 HTTP 客户端。"""
+        self._client.close()
+
+    async def aclose(self) -> None:
+        """关闭已经创建的异步 HTTP 客户端。"""
+        if self._async_client is not None:
+            await self._async_client.close()
+            self._async_client = None
+
+
+def _model_tool_call_from_stream(state: Mapping[str, str]) -> ModelToolCall:
+    raw_arguments = state.get("arguments") or "{}"
+    try:
+        parsed = json.loads(raw_arguments)
+    except (json.JSONDecodeError, TypeError):
+        parsed = {}
+    return ModelToolCall(
+        id=state.get("id") or "",
+        name=state.get("name") or "",
+        arguments=parsed if isinstance(parsed, dict) else {},
+        raw_arguments=raw_arguments,
+    )
+
+
+async def _close_async_stream(stream: Any) -> None:
+    close = getattr(stream, "close", None)
+    if not callable(close):
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result
 
 
 def convert_chat_messages(

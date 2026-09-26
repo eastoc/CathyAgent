@@ -14,7 +14,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from cathy.session.models import Message  # noqa: E402
 from cathy.session.store import SessionStore  # noqa: E402
-from cathy.contracts import AttachmentRef, ImageBlock, TextBlock  # noqa: E402
+from cathy.contracts import (  # noqa: E402
+    AttachmentRef,
+    ImageBlock,
+    TextBlock,
+    ToolInvocation,
+    ToolResult,
+    ToolTaskRecord,
+)
 from cathy.contracts.content import text_content  # noqa: E402
 
 
@@ -172,6 +179,50 @@ class SessionStoreTest(unittest.TestCase):
         self.assertIn("content_json", columns)
         self.assertIn("metadata_json", columns)
         self.assertNotIn("content", columns)
+
+    def test_background_tool_task_roundtrip_preserves_provider_ids(self) -> None:
+        with SessionStore(self.db_path) as store:
+            session = store.create("session-task")
+            queued = ToolTaskRecord.queued(
+                task_id="task-1",
+                run_id="run-1",
+                session_id=session.id,
+                invocation=ToolInvocation(
+                    call_id="call-1",
+                    name="analyze_video",
+                    arguments={"video_id": "v1"},
+                ),
+                provider="openai",
+                provider_call_id="call-1",
+                provider_response_id="resp-1",
+                latest_response_id="resp-2",
+            )
+            store.create_tool_task(queued)
+            completed = queued.with_updates(
+                status="succeeded",
+                result=ToolResult.succeeded(
+                    call_id="call-1",
+                    tool_name="analyze_video",
+                    content="分析完成",
+                    metadata={"frames": 10},
+                ),
+                finished_at=queued.created_at + 1,
+            )
+            store.update_tool_task(completed)
+
+        with SessionStore(self.db_path) as store:
+            loaded = store.load_tool_task("task-1")
+            by_run = store.list_tool_tasks(run_id="run-1")
+
+        assert loaded is not None
+        self.assertEqual(loaded.provider_call_id, "call-1")
+        self.assertEqual(loaded.provider_response_id, "resp-1")
+        self.assertEqual(loaded.latest_response_id, "resp-2")
+        self.assertEqual(loaded.status, "succeeded")
+        assert loaded.result is not None
+        self.assertEqual(loaded.result.text, "分析完成")
+        self.assertEqual(loaded.result.metadata["frames"], 10)
+        self.assertEqual([task.task_id for task in by_run], ["task-1"])
 
 
 if __name__ == "__main__":

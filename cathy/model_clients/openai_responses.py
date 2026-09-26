@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, AsyncIterator, Mapping, Sequence
 
 from openai import AsyncOpenAI, OpenAI
 
 from ..contracts import (
     AttachmentResolver,
+    ModelEvent,
     ModelRequest,
     ModelResponse,
     ModelTool,
@@ -86,6 +88,93 @@ class OpenAIResponsesClient:
         response = await self._acreate_with_retry(kwargs, stage=request.stage)
         return normalize_responses_response(response)
 
+    async def astream(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        """流式执行 Responses 请求并产出供应商无关事件。
+
+        只对建立流之前的失败执行重试；一旦收到流事件就不自动重放请求，
+        避免调用方收到重复 token 或重复工具调用。
+        """
+        kwargs = self._build_request_kwargs(request)
+        kwargs["stream"] = True
+        stream = await self._acreate_with_retry(kwargs, stage=request.stage)
+        started = False
+
+        try:
+            async for event in stream:
+                event_type = str(getattr(event, "type", ""))
+                if event_type == "response.created":
+                    started = True
+                    yield ModelEvent(type="response_started", raw=event)
+                    continue
+
+                if not started:
+                    started = True
+                    yield ModelEvent(type="response_started")
+
+                if event_type == "response.output_text.delta":
+                    yield ModelEvent(
+                        type="text_delta",
+                        text=str(getattr(event, "delta", "") or ""),
+                        raw=event,
+                    )
+                elif event_type.endswith(".delta") and "reasoning" in event_type:
+                    yield ModelEvent(
+                        type="reasoning_delta",
+                        text=str(getattr(event, "delta", "") or ""),
+                        raw=event,
+                    )
+                elif event_type == "response.output_item.added":
+                    item = getattr(event, "item", None)
+                    if getattr(item, "type", None) == "function_call":
+                        yield ModelEvent(
+                            type="tool_call_started",
+                            metadata={
+                                "call_id": str(
+                                    getattr(item, "call_id", None)
+                                    or getattr(item, "id", None)
+                                    or ""
+                                ),
+                                "name": str(getattr(item, "name", "") or ""),
+                                "async_execution": _response_item_is_async(item),
+                                "output_index": getattr(event, "output_index", None),
+                            },
+                            raw=event,
+                        )
+                elif event_type == "response.function_call_arguments.delta":
+                    yield ModelEvent(
+                        type="tool_call_delta",
+                        text=str(getattr(event, "delta", "") or ""),
+                        metadata={
+                            "call_id": str(getattr(event, "item_id", "") or ""),
+                            "output_index": getattr(event, "output_index", None),
+                        },
+                        raw=event,
+                    )
+                elif event_type in {"response.completed", "response.incomplete"}:
+                    raw_response = getattr(event, "response", None)
+                    if raw_response is None:
+                        raise RuntimeError(f"{event_type} 事件缺少 response")
+                    yield ModelEvent(
+                        type=(
+                            "response_completed"
+                            if event_type == "response.completed"
+                            else "response_incomplete"
+                        ),
+                        response=normalize_responses_response(raw_response),
+                        raw=event,
+                    )
+                elif event_type in {"error", "response.failed"}:
+                    raise RuntimeError(_response_stream_error_message(event))
+        except asyncio.CancelledError:
+            raise
+        except LLMCallError:
+            raise
+        except Exception as exc:
+            failure = classify_llm_exception(exc, stage=request.stage, attempts=1)
+            raise LLMCallError(failure) from exc
+        finally:
+            await _close_async_stream(stream)
+
     def _build_request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         input_messages = request.messages
         if request.turn_state and request.delta_messages is not None:
@@ -160,6 +249,34 @@ class OpenAIResponsesClient:
         if delay > 0:
             await asyncio.sleep(delay)
 
+    def close(self) -> None:
+        """关闭同步 HTTP 客户端。"""
+        self._client.close()
+
+    async def aclose(self) -> None:
+        """关闭已经创建的异步 HTTP 客户端。"""
+        if self._async_client is not None:
+            await self._async_client.close()
+            self._async_client = None
+
+
+def _response_stream_error_message(event: Any) -> str:
+    error = getattr(event, "error", None)
+    if error is None:
+        response = getattr(event, "response", None)
+        error = getattr(response, "error", None)
+    message = getattr(error, "message", None)
+    return str(message or getattr(event, "message", None) or "Responses 流执行失败")
+
+
+async def _close_async_stream(stream: Any) -> None:
+    close = getattr(stream, "close", None)
+    if not callable(close):
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result
+
 
 def convert_response_tool(tool: ModelTool) -> dict[str, Any]:
     """把内部工具定义转换为 Responses function schema。"""
@@ -175,6 +292,8 @@ def convert_response_tool(tool: ModelTool) -> dict[str, Any]:
         converted["description"] = tool.description
     if tool.strict is not None:
         converted["strict"] = tool.strict
+    if tool.async_execution:
+        converted["async"] = True
     return converted
 
 
@@ -320,12 +439,15 @@ def _convert_historical_tool_call(tool_call: Any) -> dict[str, Any] | None:
     arguments = source.get("arguments") or "{}"
     if isinstance(arguments, Mapping):
         arguments = json.dumps(dict(arguments), ensure_ascii=False)
-    return {
+    converted = {
         "type": "function_call",
         "call_id": str(tool_call.get("call_id") or tool_call.get("id") or ""),
         "name": str(name),
         "arguments": str(arguments),
     }
+    if tool_call.get("async_execution") or tool_call.get("async"):
+        converted["async"] = True
+    return converted
 
 
 def _stringify_tool_output(output: Any) -> str:
@@ -362,6 +484,7 @@ def normalize_responses_response(response: Any) -> ModelResponse:
                     name=str(getattr(item, "name", "")),
                     arguments=parsed_arguments,
                     raw_arguments=raw_arguments_text,
+                    async_execution=_response_item_is_async(item),
                 )
             )
         elif item_type == "message" and not text_parts:
@@ -399,3 +522,10 @@ def _parse_arguments(raw_arguments: Any) -> tuple[str, Mapping[str, Any]]:
     except (json.JSONDecodeError, TypeError):
         parsed = {}
     return raw_arguments_text, parsed if isinstance(parsed, dict) else {}
+
+
+def _response_item_is_async(item: Any) -> bool:
+    value = getattr(item, "async_", None)
+    if value is None:
+        value = getattr(item, "async", False)
+    return bool(value)

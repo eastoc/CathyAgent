@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import json
 import time
 import weakref
 from dataclasses import dataclass, field
@@ -23,6 +22,8 @@ from .contracts import (
     ModelClient,
     ModelToolCall,
     RunContext,
+    ToolInvocation,
+    ToolResult,
 )
 from .contracts.content import serialize_content_blocks, text_content, text_model_content
 from .context import ContextAssembler
@@ -36,7 +37,7 @@ from .hooks import (
 )
 from .llm_errors import LLMCallError
 from .model_clients.invoke import agenerate_model_response
-from .plugins import PluginRegistry
+from .plugins import PluginRegistry, ToolScheduler
 from .session.models import Message, Session
 from .session.store import SessionStore
 
@@ -81,6 +82,7 @@ def _model_tool_calls_to_dicts(tool_calls: tuple[ModelToolCall, ...]) -> list[di
             "name": tc.name,
             "arguments": dict(tc.arguments),
             "raw_arguments": tc.raw_arguments,
+            "async_execution": tc.async_execution,
         }
         for tc in tool_calls
     ]
@@ -99,6 +101,7 @@ class Agent:
         hooks: HookManager | None = None,
         permission_cfg: dict[str, Any] | None = None,
         attachment_resolver: AttachmentResolver | None = None,
+        tool_scheduler: ToolScheduler | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -109,6 +112,7 @@ class Agent:
         self.hooks = hooks
         self.permission_cfg = permission_cfg or {}
         self.attachment_resolver = attachment_resolver
+        self.tool_scheduler = tool_scheduler or ToolScheduler(tools)
         # asyncio 原语绑定事件循环。按 loop 保存锁，支持同步兼容层每次创建新 loop。
         self._session_locks: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
@@ -390,8 +394,13 @@ class Agent:
             messages.append(assistant_msg.to_model_dict())
 
             tool_result_messages: list[dict[str, Any]] = []
-            # 第一阶段保持确定性的串行执行；后续由 ToolExecutionPolicy 控制并发。
-            for tc in response.tool_calls:
+            prepared: list[tuple[int, ModelToolCall, str, dict[str, Any]]] = []
+            outcomes: dict[int, str | ToolResult] = {}
+            effective_args: dict[int, dict[str, Any]] = {}
+
+            # Hook 和权限判断保持确定性的模型输出顺序；通过的工具随后统一提交给
+            # ToolScheduler，由 max_concurrency/concurrency_key 决定实际并发度。
+            for index, tc in enumerate(response.tool_calls):
                 name = tc.name
                 args = dict(tc.arguments)
                 desc = None
@@ -436,6 +445,7 @@ class Agent:
                 if pre_decision is not None:
                     if pre_decision.rewrite_params is not None:
                         args = dict(pre_decision.rewrite_params)
+                    effective_args[index] = args
                     if pre_decision.block:
                         reason = (
                             pre_decision.block_reason
@@ -451,15 +461,10 @@ class Agent:
                                 "step": step,
                             },
                         )
-                        tool_message = self._persist_tool_result(
-                            session,
-                            call_id=tc.id,
-                            name=name,
-                            result=result,
-                        )
-                        messages.append(tool_message)
-                        tool_result_messages.append(tool_message)
+                        outcomes[index] = result
                         continue
+                else:
+                    effective_args[index] = args
 
                 yield factory.create(
                     "tool_started",
@@ -470,12 +475,44 @@ class Agent:
                         "args": args,
                     },
                 )
-                started = time.monotonic()
-                try:
-                    result = await self._acall_tool(name, args)
-                except Exception as exc:
-                    result = _tool_error_payload(name, exc)
-                latency_ms = int((time.monotonic() - started) * 1000)
+                prepared.append((index, tc, name, args))
+
+            scheduled_results = await self.tool_scheduler.execute_many(
+                [
+                    ToolInvocation(
+                        call_id=tc.id,
+                        name=name,
+                        arguments=args,
+                    )
+                    for _index, tc, name, args in prepared
+                ]
+            )
+            for (index, _tc, _name, _args), tool_result in zip(
+                prepared,
+                scheduled_results,
+            ):
+                outcomes[index] = tool_result
+
+            # 结果按模型原始 tool-call 顺序回灌，避免并发完成顺序改变上下文语义。
+            for index, tc in enumerate(response.tool_calls):
+                name = tc.name
+                outcome = outcomes[index]
+                if isinstance(outcome, str):
+                    result = outcome
+                    tool_message = self._persist_tool_result(
+                        session,
+                        call_id=tc.id,
+                        name=name,
+                        result=result,
+                    )
+                    messages.append(tool_message)
+                    tool_result_messages.append(tool_message)
+                    continue
+
+                tool_result = outcome
+                result = tool_result.text
+                latency_ms = int(tool_result.metadata.get("latency_ms", 0))
+                args = effective_args[index]
 
                 post_decision = await self._adispatch(
                     POST_TOOL_USE,
@@ -486,6 +523,8 @@ class Agent:
                         "params": args,
                         "result": result,
                         "latency_ms": latency_ms,
+                        "status": tool_result.status,
+                        "error_code": tool_result.error_code,
                     },
                 )
                 if post_decision is not None and post_decision.inject_context:
@@ -502,6 +541,11 @@ class Agent:
                         "name": name,
                         "result": result,
                         "latency_ms": latency_ms,
+                        "status": tool_result.status,
+                        "error_code": tool_result.error_code,
+                        "artifacts": list(tool_result.artifacts),
+                        "content": serialize_content_blocks(tool_result.content),
+                        "metadata": dict(tool_result.metadata),
                     },
                 )
                 tool_message = self._persist_tool_result(
@@ -549,16 +593,6 @@ class Agent:
             HookEvent(type=event_type, **kwargs),
         )
         return await loop.run_in_executor(None, call)
-
-    async def _acall_tool(self, name: str, args: dict[str, Any]) -> str:
-        acall = getattr(self.tools, "acall", None)
-        if callable(acall):
-            return await acall(name, args)
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None,
-            functools.partial(self.tools.call, name, args),
-        )
 
     def _persist_message(self, session: Session, message: Message) -> None:
         # SQLite Store 仍是同步边界；下一阶段会改为单 writer queue。
@@ -614,17 +648,4 @@ def _llm_error_message(exc: LLMCallError) -> str:
     return (
         f"[LLMError:{failure.reason}] {retry_text}: "
         f"{failure.error_type}: {failure.message}"
-    )
-
-
-def _tool_error_payload(tool_name: str, exc: Exception) -> str:
-    return json.dumps(
-        {
-            "type": "tool_error",
-            "tool": tool_name,
-            "error_type": type(exc).__name__,
-            "message": str(exc),
-            "retryable": False,
-        },
-        ensure_ascii=False,
     )

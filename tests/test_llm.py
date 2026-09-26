@@ -19,16 +19,40 @@ from cathy.llm import (  # noqa: E402
     uses_max_completion_tokens,
 )
 from cathy.llm_errors import LLMCallError  # noqa: E402
-from cathy.contracts import ModelClient, ModelRequest, ModelTool  # noqa: E402
+from cathy.contracts import (  # noqa: E402
+    AsyncModelClient,
+    ModelClient,
+    ModelRequest,
+    ModelResponse,
+    ModelTool,
+)
 from cathy.artifacts import LocalArtifactStore  # noqa: E402
 from cathy.contracts import ImageBlock, TextBlock  # noqa: E402
 from cathy.contracts.content import serialize_content_blocks  # noqa: E402
 from cathy.contracts.content import text_model_content  # noqa: E402
 from cathy.model_clients.openai_compatible_chat import convert_chat_messages  # noqa: E402
+from cathy.model_clients import astream_model_response  # noqa: E402
 
 
 class _RetryableServerError(Exception):
     status_code = 500
+
+
+class _AsyncStream:
+    def __init__(self, events: list[object]) -> None:
+        self._events = list(events)
+        self.closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._events:
+            raise StopAsyncIteration
+        return self._events.pop(0)
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 class LLMClientTest(unittest.TestCase):
@@ -63,6 +87,126 @@ class LLMClientTest(unittest.TestCase):
 
         self.assertEqual(response.text, "异步完成")
         async_openai_cls.return_value.chat.completions.create.assert_awaited_once()
+
+    @patch("cathy.model_clients.openai_compatible_chat.AsyncOpenAI")
+    @patch("cathy.model_clients.openai_compatible_chat.OpenAI")
+    def test_astream_accumulates_text_reasoning_and_tool_calls(
+        self,
+        _openai_cls: MagicMock,
+        async_openai_cls: MagicMock,
+    ) -> None:
+        chunks = [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content="完成",
+                            reasoning_content="先观察",
+                            tool_calls=[
+                                SimpleNamespace(
+                                    index=0,
+                                    id="call_1",
+                                    function=SimpleNamespace(
+                                        name="echo",
+                                        arguments='{"msg":',
+                                    ),
+                                )
+                            ],
+                        )
+                    )
+                ]
+            ),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content="任务",
+                            reasoning_content=None,
+                            tool_calls=[
+                                SimpleNamespace(
+                                    index=0,
+                                    id=None,
+                                    function=SimpleNamespace(
+                                        name=None,
+                                        arguments='"hi"}',
+                                    ),
+                                )
+                            ],
+                        )
+                    )
+                ]
+            ),
+        ]
+        stream = _AsyncStream(chunks)
+        async_openai_cls.return_value.chat.completions.create = AsyncMock(
+            return_value=stream
+        )
+        client = LLMClient(
+            api_key="test-key",
+            base_url="https://api.example/v1",
+            model="qwen-plus",
+        )
+        self.assertIsInstance(client, AsyncModelClient)
+
+        async def collect():
+            return [
+                event
+                async for event in client.astream(
+                    ModelRequest(messages=[{"role": "user", "content": "执行任务"}])
+                )
+            ]
+
+        events = asyncio.run(collect())
+
+        self.assertEqual(
+            [event.type for event in events],
+            [
+                "response_started",
+                "text_delta",
+                "reasoning_delta",
+                "tool_call_delta",
+                "text_delta",
+                "tool_call_delta",
+                "response_completed",
+            ],
+        )
+        final = events[-1].response
+        self.assertIsNotNone(final)
+        assert final is not None
+        self.assertEqual(final.text, "完成任务")
+        self.assertEqual(final.reasoning, "先观察")
+        self.assertEqual(final.tool_calls[0].id, "call_1")
+        self.assertEqual(final.tool_calls[0].name, "echo")
+        self.assertEqual(final.tool_calls[0].arguments, {"msg": "hi"})
+        kwargs = async_openai_cls.return_value.chat.completions.create.call_args.kwargs
+        self.assertTrue(kwargs["stream"])
+        self.assertTrue(stream.closed)
+
+    def test_astream_helper_synthesizes_events_for_non_streaming_client(self) -> None:
+        class AsyncOnlyClient:
+            model = "async-only"
+
+            async def agenerate(self, _request: ModelRequest) -> ModelResponse:
+                return ModelResponse(text="完整响应")
+
+        async def collect():
+            return [
+                event
+                async for event in astream_model_response(
+                    AsyncOnlyClient(),
+                    [{"role": "user", "content": "hi"}],
+                    stage="test",
+                )
+            ]
+
+        events = asyncio.run(collect())
+
+        self.assertEqual(
+            [event.type for event in events],
+            ["response_started", "text_delta", "response_completed"],
+        )
+        self.assertEqual(events[1].text, "完整响应")
+        self.assertEqual(events[-1].response, ModelResponse(text="完整响应"))
 
     def test_chat_adapter_collapses_text_blocks_for_text_models(self) -> None:
         messages = convert_chat_messages(

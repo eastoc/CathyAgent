@@ -20,6 +20,14 @@ from .model import (
     ModelToolCall,
     ModelTurnState,
 )
+from .tool import (
+    ToolExecutionPolicy,
+    ToolInvocation,
+    ToolResult,
+    ToolTaskRecord,
+    tool_result_from_dict,
+    tool_result_to_dict,
+)
 
 __all__ = [
     "AgentEvent",
@@ -41,4 +49,10 @@ __all__ = [
     "ModelTurnState",
     "RunContext",
     "TextBlock",
+    "ToolExecutionPolicy",
+    "ToolInvocation",
+    "ToolResult",
+    "ToolTaskRecord",
+    "tool_result_from_dict",
+    "tool_result_to_dict",
 ]

@@ -1,7 +1,4 @@
-"""ToolPlugin 接口与异常基类。
-
-对齐 ARCHITECTURE.md §7.5。Phase 1 仅实现同步版本，async 后置。
-"""
+"""ToolPlugin 同步兼容接口与异步执行入口。"""
 
 from __future__ import annotations
 
@@ -9,6 +6,8 @@ import asyncio
 import functools
 from abc import ABC, abstractmethod
 from typing import Any
+
+from ..contracts import ToolResult
 
 
 class PluginError(RuntimeError):
@@ -23,20 +22,24 @@ class ToolPlugin(ABC):
         """加载时调用一次。config 是 PluginRegistry 注入的插件级配置字典。"""
 
     @abstractmethod
-    def execute(self, tool_name: str, params: dict[str, Any]) -> str:
+    def execute(self, tool_name: str, params: dict[str, Any]) -> str | ToolResult:
         """执行工具。
 
         Args:
             tool_name: manifest.tools[].name 之一。
             params: 已通过 input_schema 校验的参数。
         Returns:
-            工具结果字符串（将作为 role=tool 消息回传给模型）。
+            工具结果字符串或类型化 ToolResult。
         Raises:
             PluginError: 工具内可控的失败（参数业务错误等）。
             其它异常会被 Registry 兜底转成结构化错误。
         """
 
-    async def aexecute(self, tool_name: str, params: dict[str, Any]) -> str:
+    async def aexecute(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+    ) -> str | ToolResult:
         """异步执行工具；默认把旧同步插件放入线程池。
 
         新插件应覆盖本方法提供原生异步实现。该兼容层无法强制终止已经开始
