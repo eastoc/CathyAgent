@@ -1,0 +1,21 @@
+control_hz: 50
+max_duration_seconds: 30
+
+# Tool +X 向下，Tool +Y 与 world +Y 对齐。
+default_down_rotation: [0, 0, 1, 0, 1, 0, -1, 0, 0]
+
+ik:
+  position_tolerance_m: 0.0005
+  orientation_tolerance_rad: 0.006
+  max_iterations: 180
+  damping: 0.0001
+  rotation_weight: 0.2
+  interpolation_step_limit: 0.18
+  seeds:
+    - [0.0, 2.4, -1.4, 0.57, 0.0, 0.0]
+    - [0.0, 2.7, -1.9, 0.77, 0.0, 0.0]
+    - [0.0, 1.8, -0.8, 0.57, 0.0, 0.0]
+
+execution:
+  position_tolerance_m: 0.005
+  orientation_tolerance_rad: 0.05

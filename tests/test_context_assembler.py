@@ -11,7 +11,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from cathy.context import ContextAssembler, build_system_prompt  # noqa: E402
+from cathy.context import (  # noqa: E402
+    ContextAssembler,
+    ROBOT_HARNESS_SYSTEM_PROMPT,
+    build_system_prompt,
+)
 from cathy.contracts.content import text_content, text_model_content  # noqa: E402
 from cathy.session.models import Message, Session  # noqa: E402
 
@@ -99,6 +103,14 @@ class ContextAssemblerTest(unittest.TestCase):
         s = build_system_prompt(tool_catalog="## 工具能力概览（自动注入）\n\n- `demo`: 示例工具")
         self.assertIn("工具能力概览", s)
         self.assertIn("demo", s)
+
+    def test_system_override_replaces_general_agent_prompt(self) -> None:
+        asm = ContextAssembler(system_override=ROBOT_HARNESS_SYSTEM_PROMPT)
+        self.assertIn("具身机器人的高层视觉操作策略", asm.system_prompt)
+        self.assertIn("只能输出一个合法 JSON 对象", asm.system_prompt)
+        self.assertIn("action_chunk` 保留给原生 VLA 路径", asm.system_prompt)
+        self.assertNotIn("Skills 使用约定", asm.system_prompt)
+        self.assertNotIn("使用工具完成任务", asm.system_prompt)
 
 
 if __name__ == "__main__":

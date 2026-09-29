@@ -1,0 +1,24 @@
+schema_version: 1
+environment_id: z1_three_cube_pick_place
+model_path: assets/z1_pick_place/scene.xml
+expected_timestep_seconds: 0.002
+
+includes:
+  robot: configs/robots/unitree_z1.yaml
+  controller: configs/controllers/z1_differential_ik.yaml
+  observation: configs/observations/z1_three_camera.yaml
+
+runtime:
+  mode: stepped
+  command_timeout_seconds: 15
+  viewer:
+    enabled: true
+    show_left_ui: true
+    show_right_ui: true
+
+reset:
+  settle_seconds: 0.5
+
+episode:
+  max_agent_actions: 100
+  max_sim_seconds: 120

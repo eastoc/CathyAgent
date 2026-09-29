@@ -18,7 +18,7 @@ from config.config import get_llm, get_llm_provider, load_config  # noqa: E402
 
 from .agent import Agent, AgentConfig  # noqa: E402
 from .artifacts import LocalArtifactStore  # noqa: E402
-from .context import ContextAssembler  # noqa: E402
+from .context import ContextAssembler, ROBOT_HARNESS_SYSTEM_PROMPT  # noqa: E402
 from .hooks import HookEvent, HookManager, SESSION_START  # noqa: E402
 from .logger import configure_logging, get_logger  # noqa: E402
 from .model_clients import build_model_client  # noqa: E402
@@ -52,6 +52,9 @@ BANNER = """\
 
 MVP_HOOK_EVENTS = {"UserPromptSubmit", "PreToolUse", "PostToolUse"}
 logger = get_logger(__name__)
+
+GENERAL_RUNTIME_PROFILE = "general"
+ROBOT_HARNESS_RUNTIME_PROFILE = "robot_harness"
 
 
 def _on_event(event: str, payload: dict) -> None:
@@ -189,16 +192,24 @@ def _select_hooks_config(cfg: dict[str, Any]) -> tuple[dict[str, Any], str]:
     return slim, "mvp"
 
 
+def _runtime_profile(cfg: dict[str, Any]) -> str:
+    profile = str(cfg.get("RUNTIME_PROFILE") or GENERAL_RUNTIME_PROFILE).strip().lower()
+    if profile not in {GENERAL_RUNTIME_PROFILE, ROBOT_HARNESS_RUNTIME_PROFILE}:
+        raise ValueError(
+            f"未知 RUNTIME_PROFILE={profile!r}；"
+            f"可选值: {GENERAL_RUNTIME_PROFILE}, {ROBOT_HARNESS_RUNTIME_PROFILE}"
+        )
+    return profile
+
+
 def build_runtime(
     cfg: dict | None = None,
     *,
     store: SessionStore | AsyncSessionStore | None = None,
 ) -> tuple[Agent, SessionStore | AsyncSessionStore, HookManager]:
-    # 离线 RunJournal 导出不需要加载 LangGraph；Subagent 只在构建 Agent 时导入。
-    from subagents.planner_executor import PlannerExecutorSubagent
-    from subagents.search_agent import SearchAgent
-
     cfg = cfg if cfg is not None else load_config()
+    runtime_profile = _runtime_profile(cfg)
+    robot_harness = runtime_profile == ROBOT_HARNESS_RUNTIME_PROFILE
     llm_conf = get_llm(cfg)
     provider = llm_conf.get("name") or get_llm_provider(cfg)
 
@@ -210,16 +221,20 @@ def build_runtime(
 
     llm = build_model_client(llm_conf)
 
-    plugins_dirs = [
-        _PROJECT_ROOT / "plugins" / "builtin",
-        _PROJECT_ROOT / "plugins" / "community",
-    ]
+    plugins_dirs = (
+        []
+        if robot_harness
+        else [
+            _PROJECT_ROOT / "plugins" / "builtin",
+            _PROJECT_ROOT / "plugins" / "community",
+        ]
+    )
     registry = PluginRegistry(
         plugins_dirs=plugins_dirs,
         plugin_configs=_build_plugin_configs(cfg),
     )
     loaded = registry.discover_and_load()
-    logger.info("[plugins] loaded: %s", loaded)
+    logger.info("[runtime] profile=%s plugins=%s", runtime_profile, loaded)
 
     # ---- Hooks（Phase 3.5 中间件） ----
     active_hooks_cfg, hooks_profile = _select_hooks_config(cfg)
@@ -232,48 +247,62 @@ def build_runtime(
     if summary:
         logger.info("[hooks] profile=%s active: %s", hooks_profile, summary)
 
-    # ---- Skills（静态模板）：read_skill 工具 + system prompt 注入目录 ----
-    skills = discover_skills([_PROJECT_ROOT / "skills"])
-    skills_plugin = SkillsPlugin(skills=skills)
-    registry.register_internal_plugin(build_skills_manifest(), skills_plugin)
-    logger.info("[skills] loaded: %s", sorted(s.name for s in skills))
+    skills = []
+    if not robot_harness:
+        # 离线 RunJournal 导出不需要加载 LangGraph；Subagent 只在通用运行时导入。
+        from subagents.planner_executor import PlannerExecutorSubagent
+        from subagents.search_agent import SearchAgent
 
-    # ---- MCP（Phase 5：外部工具生态） ----
-    # 注意：先于 subagent 注册，子 agent 内部也能用 mcp 工具。
-    _maybe_register_mcp(cfg, registry)
+        # ---- Skills（静态模板）：read_skill 工具 + system prompt 注入目录 ----
+        skills = discover_skills([_PROJECT_ROOT / "skills"])
+        skills_plugin = SkillsPlugin(skills=skills)
+        registry.register_internal_plugin(build_skills_manifest(), skills_plugin)
+        logger.info("[skills] loaded: %s", sorted(s.name for s in skills))
 
-    # ---- SearchAgent：封装 web_search，父 agent 不直接暴露裸 web_search。 ----
-    if registry.get_tool_descriptor("web_search") is not None:
-        search_agent = SearchAgent(
-            llm=llm,
-            tools=ToolView(registry, allowed={"web_search"}),
+        # ---- MCP（Phase 5：外部工具生态） ----
+        # 注意：先于 subagent 注册，子 agent 内部也能用 mcp 工具。
+        _maybe_register_mcp(cfg, registry)
+
+        # ---- SearchAgent：封装 web_search，父 agent 不直接暴露裸 web_search。 ----
+        if registry.get_tool_descriptor("web_search") is not None:
+            search_agent = SearchAgent(
+                llm=llm,
+                tools=ToolView(registry, allowed={"web_search"}),
+            )
+            registry.register_internal_plugin(
+                build_subagent_tool_manifest(search_agent),
+                SubagentToolPlugin(search_agent, hooks=hooks),
+            )
+            logger.info("[subagents] exposed: search_agent")
+        else:
+            logger.warning("[subagents] web_search 未加载，跳过 search_agent")
+
+        # ---- Subagent：planner_executor（LangGraph） ----
+        # 子 agent 内部能用：除 planner_executor 自身和裸 web_search 以外的所有工具。
+        subagent_tool_view = ToolView(
+            registry,
+            blocked={"planner_executor", "web_search"},
         )
+        planner_executor = PlannerExecutorSubagent(llm=llm, tools=subagent_tool_view)
         registry.register_internal_plugin(
-            build_subagent_tool_manifest(search_agent),
-            SubagentToolPlugin(search_agent, hooks=hooks),
+            build_subagent_tool_manifest(planner_executor),
+            SubagentToolPlugin(planner_executor, hooks=hooks),
         )
-        logger.info("[subagents] exposed: search_agent")
+        logger.info("[subagents] exposed: planner_executor")
+
+        exposed_tools = ToolView(registry, blocked={"web_search"})
     else:
-        logger.warning("[subagents] web_search 未加载，跳过 search_agent")
+        # 双保险：即使未来 registry 获得内部工具，robot harness 仍不向模型暴露。
+        exposed_tools = ToolView(registry, allowed=set())
 
-    # ---- Subagent：planner_executor（LangGraph） ----
-    # 子 agent 内部能用：除 planner_executor 自身和裸 web_search 以外的所有工具。
-    subagent_tool_view = ToolView(registry, blocked={"planner_executor", "web_search"})
-    planner_executor = PlannerExecutorSubagent(llm=llm, tools=subagent_tool_view)
-    registry.register_internal_plugin(
-        build_subagent_tool_manifest(planner_executor),
-        SubagentToolPlugin(planner_executor, hooks=hooks),
-    )
-    logger.info("[subagents] exposed: planner_executor")
-
-    exposed_tools = ToolView(registry, blocked={"web_search"})
     tool_catalog = build_tool_catalog(exposed_tools.list_tools())
     skill_catalog = build_skill_catalog(skills)
 
     agent_cfg = cfg.get("AGENT") or {}
     session_cfg = cfg.get("SESSION") or {}
     assembler = ContextAssembler(
-        project_root=Path.cwd(),
+        project_root=None if robot_harness else Path.cwd(),
+        system_override=(ROBOT_HARNESS_SYSTEM_PROMPT if robot_harness else None),
         tool_catalog=tool_catalog,
         skill_catalog=skill_catalog,
         extra=str(agent_cfg.get("extra_system") or "").strip(),

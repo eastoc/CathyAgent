@@ -1,0 +1,115 @@
+name: mujoco
+version: 0.1.0
+description: 配置化 Unitree Z1 MuJoCo manipulation 仿真环境。
+
+tools:
+  - name: robot_describe
+    description: 查询机器人、坐标系、工作空间、相机、控制频率和支持能力。
+    input_schema:
+      type: object
+      properties: {}
+      required: []
+      additionalProperties: false
+    side_effect: none
+    concurrency_key: mujoco_runtime
+    max_concurrency: 1
+
+  - name: robot_observe
+    description: 获取最新机器人状态和所选 RGB 相机图像；不返回物体真值。
+    input_schema:
+      type: object
+      properties:
+        cameras:
+          type: array
+          items:
+            type: string
+            enum: [overview, top, wrist]
+          uniqueItems: true
+        render:
+          type: boolean
+          default: true
+      required: []
+      additionalProperties: false
+    side_effect: none
+    concurrency_key: mujoco_runtime
+    max_concurrency: 1
+    timeout_seconds: 30
+
+  - name: robot_move_ee
+    description: 将 Z1 TCP 移动到 world 或 link00 坐标系中的目标位姿；省略姿态时保持工具朝下。
+    input_schema:
+      type: object
+      properties:
+        frame:
+          type: string
+          enum: [world, link00]
+        position:
+          type: array
+          minItems: 3
+          maxItems: 3
+          items:
+            type: number
+        quaternion_wxyz:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items:
+            type: number
+        duration_seconds:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 30
+          default: 1.5
+      required: [frame, position]
+      additionalProperties: false
+    side_effect: reversible
+    concurrency_key: mujoco_runtime
+    max_concurrency: 1
+    timeout_seconds: 30
+
+  - name: robot_set_gripper
+    description: 设置 Z1 夹爪归一化开度，0 为闭合，1 为完全打开。
+    input_schema:
+      type: object
+      properties:
+        opening:
+          type: number
+          minimum: 0
+          maximum: 1
+      required: [opening]
+      additionalProperties: false
+    side_effect: reversible
+    concurrency_key: mujoco_runtime
+    max_concurrency: 1
+    timeout_seconds: 10
+
+  - name: robot_wait
+    description: 保持当前控制目标并推进指定仿真时间，不按墙钟 sleep。
+    input_schema:
+      type: object
+      properties:
+        sim_seconds:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 30
+      required: [sim_seconds]
+      additionalProperties: false
+    side_effect: reversible
+    concurrency_key: mujoco_runtime
+    max_concurrency: 1
+    timeout_seconds: 30
+
+permissions:
+  network: none
+  filesystem: simulation/mujoco
+  shell: false
+
+execution:
+  runtime: python
+  entrypoint: plugin:MujocoToolPlugin
+  timeout_seconds: 30
+  sandbox: false
+
+metadata:
+  trust_level: verified
+  tags: [robotics, mujoco, manipulation, unitree-z1]

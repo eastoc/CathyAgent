@@ -1,0 +1,11 @@
+cameras:
+  - name: overview
+    width: 960
+    height: 720
+    primary: true
+  - name: top
+    width: 960
+    height: 720
+  - name: wrist
+    width: 960
+    height: 720

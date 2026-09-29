@@ -8,16 +8,19 @@ LLM:
   retry_backoff_initial_sec: 1
   retry_backoff_max_sec: 20
   roles:
-    - planner
-    - executor
+    - policy
+
+# robot_harness：纯 VLM 策略运行时，不加载/注册/暴露插件工具、Skills、MCP 和 Subagents。
+# 如需恢复通用 Agent 能力，改为 general。
+RUNTIME_PROFILE: robot_harness
 
 TAVILY_API_KEY: ${TAVILY_API_KEY}
 
 AGENT:
   max_steps: 50
-  # 系统提示词已迁移到 cathy/context.py（DEFAULT_SYSTEM_PROMPT），
-  # 项目级规则请写入项目根的 AGENTS.md 或 CATHY.md，会自动注入。
-  # 这里仅保留可选的临时附加指令：
+  # robot_harness 使用 cathy/context.py 的 ROBOT_HARNESS_SYSTEM_PROMPT，
+  # 不注入项目 AGENTS.md/CATHY.md；general 档位仍使用 DEFAULT_SYSTEM_PROMPT。
+  # 这里可追加 robot policy 专用约束：
   extra_system: ""
 
 SESSION:
@@ -33,7 +36,7 @@ SESSION:
 # - Time MCP：官方实现为 Python 包 `mcp-server-time`（npm 上 **没有**
 #   `@modelcontextprotocol/server-time`，用 npx 会 404）；见下方 `time` 段。
 MCP:
-  enabled: true
+  enabled: false
   connect_timeout_sec: 60      # 启动期连接 + tools/list 的总超时
   call_timeout_sec: 120        # 单次工具调用超时
   # 可选：FastMCP Client 暴露给 MCP 服务的 roots（filesystem 会回调 list_roots）。

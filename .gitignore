@@ -9,6 +9,7 @@ tests/
 tests/**
 /data/**
 /log/
+simulation/**/outputs/
 *.db
 *.db-journal
 **/.DS_Store
