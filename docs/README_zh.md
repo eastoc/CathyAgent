@@ -2,7 +2,19 @@
 
 [English README](../README.md)
 
-本地Agent harness内核，我们正在尝试构建Robot CAD Agent，旨在Agent自主完成机器人的设计、CAD建模和运动仿真。 
+CathyAgent 是面向工具调用 AI 系统的本地 Agent Harness 内核。除通用 ReAct 工作流外，当前已经支持具身 manipulation Runtime：Agent 可以通过结构化工具观察并控制 MuJoCo 中的 Unitree Z1 机械臂。
+
+## MuJoCo Manipulation 效果
+
+### Unitree Z1 三色方块抓取放置
+
+![Unitree Z1 在 MuJoCo 中执行三色方块抓取与放置](../simulation/mujoco/docs/images/z1-three-cube-viewer.png)
+
+### 自然语言驱动机械臂
+
+![CathyAgent 接收自然语言指令并完成红色方块抓取](../simulation/mujoco/docs/images/cathyagent-mujoco-cli.jpg)
+
+Manipulation Runtime 由 CathyAgent 主导：Harness 维护多轮上下文，并通过工具完成环境发现、RGB 观察、末端移动、夹爪控制和仿真时间推进。完整架构与配置见 [MuJoCo Runtime 文档](../simulation/mujoco/README.md)。
 
 ## 快速开始
 
@@ -42,6 +54,32 @@ python -m cathy
 
 退出：`quit` / `exit` / `q` / Ctrl+C。
 
+### 4. 运行 MuJoCo Manipulation Agent
+
+安装可选仿真依赖：
+
+```bash
+pip install -r simulation/mujoco/requirements.txt
+```
+
+macOS 需要使用 `mjpython`，让被动 Viewer 在 UI 线程中运行：
+
+```bash
+mjpython -m simulation.mujoco --agent
+```
+
+输入自然语言任务：
+
+```text
+你 > 把红色小方块放到盒子中
+```
+
+CI 或无桌面环境使用：
+
+```bash
+python -m simulation.mujoco --agent --no-viewer
+```
+
 ## 当前能力（Phase 5.1 · MCP + 权限治理）
 
 | 模块 | 状态 |
@@ -62,7 +100,38 @@ python -m cathy
 | **MCP roots 协商**（`file://` 规范化 + filesystem 参数自动推断） | ✅ |
 | **MCP 工具命名**（`mcp__<server>__<tool>`，单 server 回退 `mcp__<tool>`） | ✅ |
 | **MCP 权限治理**（`PERMISSION.mcp_rules`：deny/ask/allow） | ✅ |
+| **Agent 主导的 MuJoCo manipulation Runtime** | ✅ |
+| **Unitree Z1 三色方块物理抓取环境** | ✅ |
+| **多模态 RGB 观测与内容寻址 Artifact** | ✅ |
+| **被动 Viewer 与线程安全状态同步** | ✅ |
+| **模型响应、工具调用和工具结果流式输出** | ✅ |
+| **Agent 工具与特权评测状态隔离** | ✅ |
 | iMessage / 远端 Linux Agent | 见 `ROADMAP.md`，后续 Phase 实现 |
+
+## MuJoCo Manipulation Runtime
+
+```text
+用户指令
+  -> CathyAgent 多轮 Agent Loop
+     -> robot_describe / robot_observe / robot_move_ee
+        / robot_set_gripper / robot_wait
+        -> MujocoToolPlugin
+           -> MujocoRuntime（队列 + 独占状态线程）
+              -> Backend + Z1Controller + RGB Observation + Viewer
+```
+
+核心特性：
+
+- CathyAgent 主导交互循环，MuJoCo 不反向调用 Agent。
+- VLM 每轮输出一个末端目标位姿，而不是 action chunk；IK、轨迹插值和关节控制由本地控制器完成。
+- `robot_describe` 动态提供坐标系、workspace、相机、单位和控制器能力。
+- `robot_observe` 返回本体状态、相机标定和 RGB 图像，图像以 SHA-256 Artifact 持久化。
+- Runtime 创建时自动打开被动 Viewer，并在 Viewer lock 内修改物理状态。
+- MuJoCo `model/data` 只由独占线程持有，工具通过异步命令队列调用。
+- REPL 实时显示模型文本、工具参数、工具结果、耗时和图像 Artifact ID。
+- 物体真值只提供给物理回归评测器，不暴露为 Agent 工具。
+
+默认场景、控制器、观测配置、模型资源、测试、截图和运行输出均自包含在 [`simulation/mujoco/`](../simulation/mujoco/README.md)。
 
 ## Skill 与 Subagent
 
@@ -85,6 +154,7 @@ python -m cathy
 | `search_agent` | `search_agent` | LangGraph 搜索子 agent：扩写 query、调用 `web_search`、筛选相关网页 |
 | `planner_executor` | `planner_executor` | LangGraph 实现的 plan-execute-replan 子 agent |
 | `mcp`（运行时注入） | `mcp__<server>__<tool>` | 外部 MCP 生态工具（FastMCP Client 聚合） |
+| `mujoco` | `robot_describe` / `robot_observe` / `robot_move_ee` / `robot_set_gripper` / `robot_wait` | Z1 manipulation Runtime、RGB Artifact 与被动 Viewer |
 
 ## MCP 与权限治理
 
@@ -302,6 +372,16 @@ CathyAgent/
   skills/
     summarize/SKILL.md
     write_blog/SKILL.md
+  simulation/
+    contracts.py              # 仿真器无关的 Runtime 契约
+    mujoco/
+      configs/                # 环境、机器人、控制器和观测配置
+      assets/                 # Z1 MJCF、网格与抓取场景
+      docs/images/            # README 效果截图
+      tests/                  # Runtime 与物理回归测试
+      runtime.py              # MuJoCo 独占状态线程
+      plugin.py               # CathyAgent 机器人工具
+      viewer.py               # 被动 Viewer 生命周期与同步
   docs/                       # 开发文档
     ROADMAP.md
     ARCHITECTURE.md

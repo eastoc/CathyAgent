@@ -4,6 +4,33 @@
 
 第一版采用“CathyAgent 主导、多轮工具调用、MuJoCo 同进程运行”的架构。环境基于 RobotTest 的 Unitree Z1 三色方块物理抓取场景，不使用 UR5，也不要求 CathyAgent 核心维护 action chunk。
 
+## 核心特性
+
+- **Agent 主导闭环**：CathyAgent 维护任务上下文，按照“观察 → 单步动作 → 执行反馈 → 再观察”持续驱动 MuJoCo，而不是由仿真循环反向调用 Agent。
+- **VLM 末端位姿控制**：`robot_move_ee` 接收单个 TCP 目标点和可选四元数；IK、轨迹插值、关节控制和物理步进由本地控制器完成，不要求模型输出 action chunk。
+- **动态环境发现**：Agent 可通过 `robot_describe` 获取 `base_frame`、workspace、相机、控制频率、单位和夹爪约定，无需把仿真参数硬编码进模型接口。
+- **多模态观测**：`robot_observe` 返回关节/TCP 状态、相机标定及 RGB 图像；图像以 SHA-256 Artifact 持久化，并可继续作为模型上下文使用。
+- **实时图形 Viewer**：创建 Runtime 时自动打开 MuJoCo 被动 Viewer；状态修改使用 Viewer lock，每个控制周期结束后同步画面。
+- **异步串行 Runtime**：MuJoCo `model/data` 由独占线程持有，Agent 工具通过异步队列调用，支持超时、取消、动作预算和快照编号。
+- **流式可观测性**：REPL 实时打印模型文本、工具参数、工具结果、耗时和图像 Artifact ID；完整事件同时写入 `outputs/sessions.db`。
+- **配置与核心解耦**：环境 YAML、机器人/控制器/观测配置、MJCF、网格、截图、测试和输出均位于 `simulation/mujoco/`，不侵占 CathyAgent 主配置目录。
+- **物理抓取回归**：内置 Unitree Z1 红、蓝、绿三色方块抓取放置场景，并使用真实接触进行连续物理回归。
+- **评测状态隔离**：物体真值和容器判定只存在于 `evaluation.py`，不注册为 Agent 工具，避免策略读取特权仿真状态。
+
+## 效果展示
+
+### Z1 三色方块抓取仿真
+
+![Unitree Z1 在 MuJoCo 中执行三色方块抓取与放置](docs/images/z1-three-cube-viewer.png)
+
+MuJoCo Viewer 会随 Runtime 创建，并实时同步机械臂、夹爪、方块和容器的物理状态。
+
+### CathyAgent 指令驱动
+
+![CathyAgent 接收自然语言指令并完成红色方块抓取](docs/images/cathyagent-mujoco-cli.jpg)
+
+通过 `mjpython -m simulation.mujoco --agent` 启动后，可以直接使用中文或英文 manipulation 指令驱动机器人；模型通过多轮工具调用完成观察、移动、抓取、放置和结果验证。
+
 ## 架构
 
 ```text
@@ -34,6 +61,7 @@
 simulation/mujoco/
 ├── configs/                 # 环境、机器人、控制器、观测配置
 ├── assets/                  # Z1 MJCF、网格和三色方块场景
+├── docs/images/             # README 效果截图
 ├── tests/                   # 模块级测试与物理回归
 ├── outputs/                 # 会话、图像 Artifact（git ignored）
 ├── backend.py               # MuJoCo model/data 边界

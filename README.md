@@ -2,7 +2,19 @@
 
 [中文文档](docs/README_zh.md)
 
-CathyAgent is a local agent harness kernel. The project is being shaped toward a Robot CAD Agent: an agent that can reason about robot design, CAD modeling, and motion simulation with tools, subagents, skills, hooks, and MCP integrations.
+CathyAgent is a local agent harness kernel for tool-using AI systems. It supports general ReAct workflows and an embodied manipulation runtime where an agent can observe and control a Unitree Z1 robot in MuJoCo through structured tools.
+
+## MuJoCo Manipulation Demo
+
+### Unitree Z1 three-cube pick-and-place
+
+![Unitree Z1 performing three-cube pick-and-place in MuJoCo](simulation/mujoco/docs/images/z1-three-cube-viewer.png)
+
+### Natural-language robot control
+
+![CathyAgent completing a red-cube pick-and-place instruction](simulation/mujoco/docs/images/cathyagent-mujoco-cli.jpg)
+
+The manipulation runtime is agent-driven: CathyAgent owns the multi-turn context and calls MuJoCo tools for environment discovery, RGB observation, end-effector motion, gripper control, and simulation-time advancement. See the [MuJoCo runtime documentation](simulation/mujoco/README.md) for architecture and configuration details.
 
 ## Quick Start
 
@@ -44,6 +56,32 @@ Inside the REPL:
 
 Exit with `quit`, `exit`, `q`, or Ctrl+C.
 
+### 4. Run the MuJoCo manipulation agent
+
+Install the optional simulation dependencies:
+
+```bash
+pip install -r simulation/mujoco/requirements.txt
+```
+
+On macOS, launch the agent with `mjpython` so the passive Viewer can run on the UI thread:
+
+```bash
+mjpython -m simulation.mujoco --agent
+```
+
+Example instruction:
+
+```text
+你 > 把红色小方块放到盒子中
+```
+
+Use `--no-viewer` for CI or headless execution:
+
+```bash
+python -m simulation.mujoco --agent --no-viewer
+```
+
 ## Capabilities
 
 | Module | Status |
@@ -64,6 +102,36 @@ Exit with `quit`, `exit`, `q`, or Ctrl+C.
 | MCP client integration through FastMCP | Done |
 | MCP roots negotiation and `mcp__<server>__<tool>` naming | Done |
 | MCP permission rules through `PERMISSION.mcp_rules` | Done |
+| Agent-driven MuJoCo manipulation runtime | Done |
+| Unitree Z1 three-cube physical pick-and-place environment | Done |
+| Multimodal RGB observations with content-addressed artifacts | Done |
+| Passive MuJoCo Viewer with lock-safe state synchronization | Done |
+| Streaming model responses, tool calls, and tool results | Done |
+| Privileged evaluation state isolated from agent tools | Done |
+
+## MuJoCo Manipulation Runtime
+
+```text
+User instruction
+  -> CathyAgent multi-turn loop
+     -> robot_describe / robot_observe / robot_move_ee
+        / robot_set_gripper / robot_wait
+        -> MujocoToolPlugin
+           -> MujocoRuntime (queue + exclusive state thread)
+              -> Backend + Z1 controller + RGB observations + Viewer
+```
+
+Key properties:
+
+- CathyAgent drives the interaction loop; MuJoCo does not call the agent.
+- VLMs produce one end-effector target at a time rather than an action chunk.
+- `robot_describe` exposes frames, workspace bounds, cameras, units, and controller capabilities dynamically.
+- RGB images are persisted as SHA-256 artifacts and can be returned to multimodal models.
+- The passive Viewer opens with the runtime and synchronizes after every control step.
+- MuJoCo `model/data` remain on one exclusive thread; tool calls use an asynchronous command queue.
+- Object ground truth is available only to the physical regression evaluator, not to the agent.
+
+The default scene, controller, observation, assets, tests, screenshots, and outputs are self-contained under [`simulation/mujoco/`](simulation/mujoco/README.md).
 
 ## Skills vs Subagents
 
@@ -86,6 +154,7 @@ Exit with `quit`, `exit`, `q`, or Ctrl+C.
 | `search_agent` | `search_agent` | Expands queries, runs concurrent web searches, filters relevant pages. |
 | `planner_executor` | `planner_executor` | LangGraph plan-execute-replan subagent. |
 | `mcp` | `mcp__<server>__<tool>` | Runtime MCP tools aggregated by FastMCP. |
+| `mujoco` | `robot_describe`, `robot_observe`, `robot_move_ee`, `robot_set_gripper`, `robot_wait` | Dedicated Z1 manipulation runtime with RGB artifacts and passive Viewer. |
 
 The main agent receives a filtered `ToolView`. In the default runtime, raw `web_search` is blocked from the main agent and from `planner_executor`; both should use `search_agent` for web research.
 
@@ -233,6 +302,16 @@ CathyAgent/
   skills/
     summarize/SKILL.md
     write_blog/SKILL.md
+  simulation/
+    contracts.py              # Simulator-independent runtime contracts
+    mujoco/
+      configs/                # Environment, robot, controller, observation
+      assets/                 # Z1 MJCF, meshes, and pick-place scene
+      docs/images/            # README demo screenshots
+      tests/                  # Runtime and physical regression tests
+      runtime.py              # Exclusive MuJoCo state thread
+      plugin.py               # CathyAgent robot tools
+      viewer.py               # Passive Viewer lifecycle and synchronization
   docs/
     README_zh.md
     ARCHITECTURE.md
