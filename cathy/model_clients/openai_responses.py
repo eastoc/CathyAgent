@@ -425,7 +425,10 @@ def convert_response_input(
                 {
                     "type": "function_call_output",
                     "call_id": str(call_id),
-                    "output": _stringify_tool_output(message.get("content")),
+                    "output": _convert_tool_output(
+                        message.get("content"),
+                        attachment_resolver=attachment_resolver,
+                    ),
                 }
             )
             continue
@@ -587,6 +590,34 @@ def _stringify_tool_output(output: Any) -> str:
     ):
         return content_blocks_to_text(coerce_content_blocks(output))
     return json.dumps(output, ensure_ascii=False)
+
+
+def _convert_tool_output(
+    output: Any,
+    *,
+    attachment_resolver: AttachmentResolver | None,
+) -> Any:
+    """将工具结果转为 Responses function_call_output 的 output。
+
+    纯文本/JSON 继续使用字符串以兼容既有行为；包含图片或文件时保留内容块，
+    让模型在下一轮直接接收多模态工具结果。
+    """
+
+    if not isinstance(output, list):
+        return _stringify_tool_output(output)
+    has_attachment = any(
+        isinstance(part, Mapping)
+        and part.get("type")
+        in {"image", "image_url", "input_image", "file", "input_file"}
+        for part in output
+    )
+    if not has_attachment:
+        return _stringify_tool_output(output)
+    return _convert_message_content(
+        output,
+        role="tool",
+        attachment_resolver=attachment_resolver,
+    )
 
 
 def normalize_responses_response(response: Any) -> ModelResponse:

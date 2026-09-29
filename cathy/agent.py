@@ -11,7 +11,7 @@ import asyncio
 import time
 import weakref
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Sequence
 
 from .contracts import (
     AgentEvent,
@@ -27,7 +27,14 @@ from .contracts import (
     ToolInvocation,
     ToolResult,
 )
-from .contracts.content import serialize_content_blocks, text_content, text_model_content
+from .contracts.content import (
+    ContentBlock,
+    TextBlock,
+    coerce_content_blocks,
+    serialize_content_blocks,
+    text_content,
+    text_model_content,
+)
 from .context import ContextAssembler
 from .hooks import (
     HookEvent,
@@ -892,6 +899,7 @@ class Agent:
 
                 tool_result = outcome
                 result = tool_result.text
+                result_content: tuple[ContentBlock, ...] = tuple(tool_result.content)
                 latency_ms = int(tool_result.metadata.get("latency_ms", 0))
                 args = effective_args[index]
 
@@ -909,10 +917,9 @@ class Agent:
                     },
                 )
                 if post_decision is not None and post_decision.inject_context:
-                    result = (
-                        f"{result}\n\n"
-                        f"[hook:PostToolUse] {post_decision.inject_context}"
-                    )
+                    injected = f"[hook:PostToolUse] {post_decision.inject_context}"
+                    result = f"{result}\n\n{injected}" if result else injected
+                    result_content = (*result_content, TextBlock(injected))
 
                 yield factory.create(
                     "tool_completed",
@@ -925,7 +932,7 @@ class Agent:
                         "status": tool_result.status,
                         "error_code": tool_result.error_code,
                         "artifacts": list(tool_result.artifacts),
-                        "content": serialize_content_blocks(tool_result.content),
+                        "content": serialize_content_blocks(result_content),
                         "metadata": dict(tool_result.metadata),
                     },
                 )
@@ -933,7 +940,7 @@ class Agent:
                     session,
                     call_id=tc.id,
                     name=name,
-                    result=result,
+                    result=result_content,
                 )
                 messages.append(tool_message)
                 tool_result_messages.append(tool_message)
@@ -1025,11 +1032,11 @@ class Agent:
         *,
         call_id: str,
         name: str,
-        result: str,
+        result: str | Sequence[ContentBlock],
     ) -> dict[str, Any]:
         tool_msg = Message(
             role="tool",
-            content=text_content(result),
+            content=coerce_content_blocks(result),
             tool_call_id=call_id,
             name=name,
         )

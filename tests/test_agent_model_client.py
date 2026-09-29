@@ -24,6 +24,7 @@ from cathy.contracts import (  # noqa: E402
     ModelToolCall,
     ModelTurnState,
     TextBlock,
+    ToolResult,
 )
 from cathy.plugins.base import ToolPlugin  # noqa: E402
 from cathy.plugins.manifest import Execution, PluginManifest, ToolSpec  # noqa: E402
@@ -59,6 +60,22 @@ class _ConcurrentPlugin(ToolPlugin):
             return f"{tool_name}:{params['value']}"
         finally:
             self.active -= 1
+
+
+class _ImagePlugin(ToolPlugin):
+    def __init__(self, ref: AttachmentRef) -> None:
+        self.ref = ref
+
+    def initialize(self, config: dict[str, Any]) -> None:
+        return None
+
+    def execute(self, tool_name: str, params: dict[str, Any]) -> ToolResult:
+        return ToolResult.succeeded(
+            call_id="",
+            tool_name=tool_name,
+            content=(TextBlock("相机观测"), ImageBlock(self.ref, detail="high")),
+            artifacts=(self.ref.artifact_id,),
+        )
 
 
 class _ScriptedModelClient:
@@ -132,6 +149,30 @@ def _concurrent_registry(plugin: _ConcurrentPlugin) -> PluginRegistry:
     return registry
 
 
+def _image_registry(plugin: _ImagePlugin) -> PluginRegistry:
+    registry = PluginRegistry(plugins_dirs=[])
+    registry.register_internal_plugin(
+        PluginManifest(
+            name="image",
+            version="0.0.1",
+            description="image tool",
+            tools=[
+                ToolSpec(
+                    name="observe",
+                    description="observe",
+                    input_schema={"type": "object", "properties": {}},
+                )
+            ],
+            permissions={},
+            execution=Execution(runtime="python", entrypoint="<internal>:Image"),
+            metadata={"trust_level": "builtin"},
+            source_dir=Path(__file__).parent,
+        ),
+        plugin,
+    )
+    return registry
+
+
 def _background_registry(plugin: _ConcurrentPlugin) -> PluginRegistry:
     registry = PluginRegistry(plugins_dirs=[])
     registry.register_internal_plugin(
@@ -162,6 +203,54 @@ def _background_registry(plugin: _ConcurrentPlugin) -> PluginRegistry:
 
 
 class AgentModelClientTest(unittest.TestCase):
+    def test_tool_image_result_is_returned_to_model_and_persisted(self) -> None:
+        ref = AttachmentRef(
+            artifact_id="sha256:" + "d" * 64,
+            mime_type="image/png",
+            sha256="d" * 64,
+            size_bytes=16,
+            filename="front.png",
+        )
+        model = _ScriptedModelClient(
+            [
+                ModelResponse(
+                    tool_calls=(
+                        ModelToolCall(id="call_image", name="observe", arguments={}),
+                    )
+                ),
+                ModelResponse(text="看到了"),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "session.db"
+            with SessionStore(db_path) as store:
+                session = store.create()
+                agent = Agent(
+                    llm=model,
+                    tools=_image_registry(_ImagePlugin(ref)),
+                    assembler=ContextAssembler(token_budget=4096),
+                    store=store,
+                )
+                answer, _trace = agent.run(session, "观察环境")
+
+            with SessionStore(db_path) as store:
+                loaded = store.load(session.id)
+
+        self.assertEqual(answer, "看到了")
+        assert model.requests[1].delta_messages is not None
+        tool_message = model.requests[1].delta_messages[0]
+        self.assertEqual(tool_message["content"][1]["type"], "image")
+        self.assertEqual(
+            tool_message["content"][1]["attachment"]["artifact_id"],
+            ref.artifact_id,
+        )
+        assert loaded is not None
+        persisted = next(
+            message for message in loaded.messages if message.role == "tool"
+        )
+        self.assertEqual(persisted.content[1], ImageBlock(ref, detail="high"))
+
     def test_multiple_tool_calls_run_concurrently_and_preserve_message_order(self) -> None:
         plugin = _ConcurrentPlugin()
         model = _ScriptedModelClient(

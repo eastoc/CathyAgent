@@ -416,6 +416,43 @@ class OpenAIResponsesClientTest(unittest.TestCase):
         self.assertTrue(image_part["image_url"].startswith("data:image/png;base64,"))
         self.assertEqual(image_part["detail"], "low")
 
+    def test_converts_tool_image_output_without_losing_attachment(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            store = LocalArtifactStore(td)
+            ref = store.put_bytes(
+                b"image",
+                mime_type="image/png",
+                filename="front.png",
+            )
+            items = convert_response_input(
+                [
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_observe",
+                        "content": serialize_content_blocks(
+                            (TextBlock("相机观测"), ImageBlock(ref, detail="high"))
+                        ),
+                    }
+                ],
+                attachment_resolver=store,
+            )
+
+        self.assertEqual(items[0]["type"], "function_call_output")
+        self.assertEqual(items[0]["call_id"], "call_observe")
+        self.assertEqual(
+            items[0]["output"][0],
+            {"type": "input_text", "text": "相机观测"},
+        )
+        self.assertEqual(items[0]["output"][1]["type"], "input_image")
+        self.assertTrue(
+            items[0]["output"][1]["image_url"].startswith(
+                "data:image/png;base64,"
+            )
+        )
+        self.assertEqual(items[0]["output"][1]["detail"], "high")
+
     def test_neutral_image_requires_attachment_resolver(self) -> None:
         ref = AttachmentRef(
             artifact_id="sha256:" + "c" * 64,
