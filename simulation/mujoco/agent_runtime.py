@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -16,8 +17,9 @@ from cathy.session import AsyncSessionStore
 from cathy.telemetry import RunJournal
 from config.config import get_llm, load_config
 
-from .config import DEFAULT_ENVIRONMENT, MODULE_ROOT
-from .prompt import SIMULATION_AGENT_SYSTEM_PROMPT
+from .config import DEFAULT_ENVIRONMENT, DEFAULT_WMA_ENVIRONMENT, MODULE_ROOT
+from .prompt import SIMULATION_AGENT_SYSTEM_PROMPT, VLA_AGENT_SYSTEM_PROMPT
+from .unitree_z1_tools import load_unitree_z1_tools_config
 
 OUTPUT_ROOT = MODULE_ROOT / "outputs"
 
@@ -46,29 +48,54 @@ class SimulationAgentRuntime:
 async def build_simulation_agent(
     cfg: Mapping[str, Any] | None = None,
     *,
-    environment: str | Path = DEFAULT_ENVIRONMENT,
+    environment: str | Path = DEFAULT_WMA_ENVIRONMENT,
     llm: Any | None = None,
     output_root: str | Path = OUTPUT_ROOT,
     viewer_enabled: bool | None = None,
+    control_mode: str = "local_direct",
 ) -> SimulationAgentRuntime:
-    """只装配 MuJoCo 工具，不修改 CathyAgent 的通用运行时配置。"""
+    """装配 Z1 直接控制或 ALOHA/Panda VLA MCP；不加载通用插件。"""
     resolved_cfg = dict(cfg) if cfg is not None else load_config()
     root = Path(output_root).resolve()
     artifacts = LocalArtifactStore(root / "artifacts")
+    if control_mode not in {"local_direct", "vla_mcp"}:
+        raise ValueError(f"未知 control_mode: {control_mode}")
+    if control_mode == "vla_mcp" and environment in {
+        DEFAULT_ENVIRONMENT,
+        DEFAULT_WMA_ENVIRONMENT,
+    }:
+        from .vla.config import DEFAULT_VLA_ENVIRONMENT
+        environment = DEFAULT_VLA_ENVIRONMENT
+    z1_tools_config = load_unitree_z1_tools_config()
     registry = PluginRegistry(
-        plugins_dirs=[MODULE_ROOT.parent],
+        plugins_dirs=[] if control_mode == "vla_mcp" else [MODULE_ROOT.parent],
         plugin_configs={
             "mujoco": {
                 "environment": str(environment),
                 "artifact_store": artifacts,
                 "viewer_enabled": viewer_enabled,
+                "unitree_z1_tools": z1_tools_config.to_plugin_config(),
             }
         },
     )
-    loaded = registry.discover_and_load()
-    if loaded != ["mujoco"]:
-        registry.shutdown()
-        raise RuntimeError(f"MuJoCo 插件加载失败: loaded={loaded}")
+    if control_mode == "vla_mcp":
+        from .vla.bootstrap import register_vla
+        startup = asyncio.create_task(asyncio.to_thread(
+            register_vla, registry, resolved_cfg, environment, artifacts, viewer_enabled,
+        ))
+        try:
+            await asyncio.shield(startup)
+        except asyncio.CancelledError:
+            try:
+                await startup
+            finally:
+                registry.shutdown()
+            raise
+    else:
+        loaded = registry.discover_and_load()
+        if loaded != ["mujoco"]:
+            registry.shutdown()
+            raise RuntimeError(f"MuJoCo 插件加载失败: loaded={loaded}")
 
     try:
         model_client = llm or build_model_client(get_llm(resolved_cfg))
@@ -81,7 +108,7 @@ async def build_simulation_agent(
     tools = registry
     assembler = ContextAssembler(
         project_root=None,
-        system_override=SIMULATION_AGENT_SYSTEM_PROMPT,
+        system_override=VLA_AGENT_SYSTEM_PROMPT if control_mode == "vla_mcp" else SIMULATION_AGENT_SYSTEM_PROMPT,
         tool_catalog=build_tool_catalog(tools.list_tools()),
         token_budget=int((resolved_cfg.get("SESSION") or {}).get("token_budget", 16000)),
         hooks=hooks,

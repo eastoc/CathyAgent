@@ -1,0 +1,10 @@
+# 仅用于保留的旧 Panda 后端；不要为默认 ALOHA 安装。
+robosuite==1.4.1
+mujoco==3.3.0
+numpy==1.26.4
+numba==0.61.2
+fastmcp==3.2.4
+pillow>=10
+pyyaml>=6.0
+jsonschema>=4.20
+openai>=2.0

@@ -23,7 +23,7 @@ tools:
           type: array
           items:
             type: string
-            enum: [overview, top, wrist]
+            enum: [cam_high, top, wrist]
           uniqueItems: true
         render:
           type: boolean
@@ -99,8 +99,83 @@ tools:
     max_concurrency: 1
     timeout_seconds: 30
 
+  - name: robot_pick
+    description: 使用 AutoDL UnifoLM-WMA 执行单红杯基准抓取；仅支持 red cup，双侧接触后自动抬升验证。
+    input_schema:
+      type: object
+      properties:
+        object_name:
+          type: string
+          minLength: 1
+          maxLength: 32
+        instruction:
+          type: string
+          minLength: 1
+          maxLength: 80
+        max_rounds:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 3
+        execute_steps:
+          type: integer
+          minimum: 1
+          maximum: 16
+          default: 16
+      required: [object_name]
+      additionalProperties: false
+    side_effect: reversible
+    concurrency_key: mujoco_runtime
+    max_concurrency: 1
+    timeout_seconds: 600
+    cancellable: true
+
+  - name: robot_release
+    description: 通过本地 Z1 控制器完全张开夹爪，不调用模型。
+    input_schema:
+      type: object
+      properties: {}
+      required: []
+      additionalProperties: false
+    side_effect: reversible
+    concurrency_key: mujoco_runtime
+    max_concurrency: 1
+    timeout_seconds: 10
+
+  - name: robot_move_to
+    description: 通过本地 SDK/IK 将 Z1 TCP 移动到目标位姿，不调用模型。
+    input_schema:
+      type: object
+      properties:
+        frame:
+          type: string
+          enum: [world, link00]
+        position:
+          type: array
+          minItems: 3
+          maxItems: 3
+          items:
+            type: number
+        quaternion_wxyz:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items:
+            type: number
+        duration_seconds:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 30
+          default: 1.5
+      required: [frame, position]
+      additionalProperties: false
+    side_effect: reversible
+    concurrency_key: mujoco_runtime
+    max_concurrency: 1
+    timeout_seconds: 30
+
 permissions:
-  network: none
+  network: ["u548917-epls-671d4d59.westd.seetacloud.com"]
   filesystem: simulation/mujoco
   shell: false
 

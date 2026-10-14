@@ -1,0 +1,56 @@
+<mujoco model="Z1 red cup WMA benchmark">
+  <include file="robot.xml"/>
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic" impratio="10"/>
+  <visual>
+    <global offwidth="1280" offheight="960" azimuth="135" elevation="-28"/>
+    <headlight ambient="0.35 0.35 0.35" diffuse="0.7 0.7 0.7" specular="0.2 0.2 0.2"/>
+    <map znear="0.003" zfar="8"/>
+    <quality shadowsize="2048"/>
+  </visual>
+  <statistic center="0 0 0.9" extent="1.4"/>
+  <default>
+    <geom friction="3 0.01 0.001" solref="0.003 1" condim="4"/>
+  </default>
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.15 0.20 0.28" rgb2="0.035 0.05 0.075" width="256" height="1536"/>
+    <texture name="floor_grid" type="2d" builtin="checker" rgb1="0.10 0.13 0.17" rgb2="0.13 0.16 0.20" width="256" height="256"/>
+    <material name="floor_mat" texture="floor_grid" texrepeat="4 4" texuniform="true" reflectance="0.05"/>
+    <material name="table_mat" rgba="0.64 0.55 0.41 1" shininess="0.15" specular="0.18"/>
+    <material name="leg_mat" rgba="0.12 0.15 0.19 1"/>
+    <material name="cup_red" rgba="0.88 0.045 0.045 1" shininess="0.2" specular="0.15"/>
+    <material name="cup_inside" rgba="0.07 0.02 0.02 1"/>
+  </asset>
+  <worldbody>
+    <light pos="0.2 -0.5 2.5" dir="0 0 -1" diffuse="0.85 0.85 0.85"/>
+    <light pos="-0.8 0.5 1.7" dir="0.4 -0.2 -1" diffuse="0.45 0.45 0.5" castshadow="false"/>
+    <geom name="floor" type="plane" size="3 3 0.05" material="floor_mat"/>
+    <body name="table">
+      <geom name="table_top" type="box" pos="0 0 0.715" size="0.60 0.42 0.035" material="table_mat"/>
+      <geom type="box" pos="-0.53 -0.35 0.34" size="0.035 0.035 0.34" material="leg_mat"/>
+      <geom type="box" pos="0.53 -0.35 0.34" size="0.035 0.035 0.34" material="leg_mat"/>
+      <geom type="box" pos="-0.53 0.35 0.34" size="0.035 0.035 0.34" material="leg_mat"/>
+      <geom type="box" pos="0.53 0.35 0.34" size="0.035 0.035 0.34" material="leg_mat"/>
+    </body>
+
+    <!-- 单目标基准：XY 对齐 checkpoint 在训练内指令下预测的两侧夹爪垫闭合中心。 -->
+    <body name="red_cup" pos="0.130 0.080 0.780">
+      <freejoint name="red_cup_free"/>
+      <geom name="red_cup_body" type="cylinder" size="0.018 0.030" mass="0.055"
+            material="cup_red" friction="3 0.01 0.001" condim="4" solref="0.003 1"/>
+      <geom name="red_cup_rim" type="cylinder" pos="0 0 0.029" size="0.020 0.002"
+            material="cup_red" mass="0.003"/>
+      <geom name="red_cup_opening" type="cylinder" pos="0 0 0.0315" size="0.015 0.001"
+            material="cup_inside" contype="0" conaffinity="0" mass="0" density="0" group="2"/>
+      <geom name="red_cup_handle_top" type="capsule" fromto="0.016 0 0.018 0.032 0 0.014"
+            size="0.004" material="cup_red" contype="0" conaffinity="0" mass="0" density="0" group="2"/>
+      <geom name="red_cup_handle_side" type="capsule" fromto="0.032 0 0.014 0.032 0 -0.014"
+            size="0.004" material="cup_red" contype="0" conaffinity="0" mass="0" density="0" group="2"/>
+      <geom name="red_cup_handle_bottom" type="capsule" fromto="0.032 0 -0.014 0.016 0 -0.018"
+            size="0.004" material="cup_red" contype="0" conaffinity="0" mass="0" density="0" group="2"/>
+    </body>
+
+    <camera name="cam_high" pos="0.70 -0.75 1.35"
+      xyaxes="0.731055268 0.682318250 0 -0.331384205 0.355054505 0.874140039" fovy="48"/>
+    <camera name="top" pos="0.04 0.02 1.85" xyaxes="1 0 0 0 1 0" fovy="58"/>
+  </worldbody>
+</mujoco>

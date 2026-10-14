@@ -1,0 +1,51 @@
+schema_version: 1
+environment_id: aloha_three_cube
+backend: native_aloha
+control_mode: vla_mcp
+
+scene:
+  seed: 7
+  table_size: [1.2, 1.2, 0.05]
+  table_height: 0.0
+  table_center_xy: [0.0, 0.6]
+  cube_half_size: 0.0175
+  cubes:
+    red: [-0.16, 0.48]
+    green: [0.0, 0.48]
+    blue: [0.16, 0.48]
+  box_xy: [0.0, 0.75]
+  box_inner_half_size: [0.10, 0.09]
+  box_height: 0.06
+  box_wall_thickness: 0.008
+  position_jitter: 0.0
+  initial_arm_qpos: [0.0, -0.96, 1.16, 0.0, -0.3, 0.0]
+  initial_gripper: 0.8
+
+observation:
+  render_height: 480
+  render_width: 640
+  # 原资产腕部20度视野过窄；本自定义场景使用75度，非训练相机标定。
+  wrist_fovy: 75.0
+  policy_size: 224
+  # 原生 Renderer 已是正常 RGB 方向；不使用 LIBERO 的180度旋转。
+  policy_rotate_180: false
+
+runtime:
+  viewer: true
+  control_hz: 50
+  settle_steps: 10
+  max_episode_steps: 6000
+  max_joint_velocity: 2.5
+  max_gripper_velocity: 5.0
+
+policy:
+  mcp_server: robot_vla
+  tool: pi_aloha_predict
+  profile: pi05_aloha
+  active_arm: both
+  allowed_arms: [both]
+  replan_steps: 5
+  default_skill_steps: 150
+  max_skill_steps: 1000
+  inference_timeout_seconds: 90
+  skill_timeout_seconds: 300

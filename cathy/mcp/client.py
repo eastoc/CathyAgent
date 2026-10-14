@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import re
 import threading
@@ -271,6 +272,39 @@ class McpHub:
 
     def list_tools(self) -> list[McpToolInfo]:
         return list(self._state.tools)
+
+    def _submit_raw(self, outer_name: str, arguments: dict[str, Any] | None):
+        inner = self._state.outer_to_inner.get(outer_name)
+        if inner is None:
+            raise McpError(f"未知 MCP 工具: {outer_name}")
+        loop, client = self._state.loop, self._state.client
+        if loop is None or client is None:
+            raise McpError("MCP hub 尚未就绪或已关闭")
+        return asyncio.run_coroutine_threadsafe(client.call_tool(inner, arguments or {}), loop)
+
+    def call_tool_raw(self, outer_name: str, arguments: dict[str, Any] | None,
+                      *, timeout: float | None = None) -> Any:
+        """保留 MCP 图片、结构化内容；旧 call_tool 文本接口保持兼容。"""
+        future = self._submit_raw(outer_name, arguments)
+        try:
+            return future.result(timeout=timeout or self._default_call_timeout)
+        except concurrent.futures.TimeoutError as exc:
+            future.cancel()
+            raise McpError(f"调用 {outer_name} 超时") from exc
+
+    async def acall_tool_raw(self, outer_name: str, arguments: dict[str, Any] | None,
+                            *, timeout: float | None = None) -> Any:
+        future = self._submit_raw(outer_name, arguments)
+        try:
+            return await asyncio.wait_for(
+                asyncio.wrap_future(future), timeout or self._default_call_timeout,
+            )
+        except asyncio.TimeoutError as exc:
+            future.cancel()
+            raise McpError(f"调用 {outer_name} 超时") from exc
+        except asyncio.CancelledError:
+            future.cancel()
+            raise
 
     def call_tool(
         self,

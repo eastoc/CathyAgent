@@ -13,6 +13,7 @@ from .errors import MujocoConfigError
 
 MODULE_ROOT = Path(__file__).resolve().parent
 DEFAULT_ENVIRONMENT = "configs/environments/z1_three_cube.yaml"
+DEFAULT_WMA_ENVIRONMENT = "configs/environments/z1_red_cup.yaml"
 
 
 def _mapping(value: Any, *, name: str) -> dict[str, Any]:

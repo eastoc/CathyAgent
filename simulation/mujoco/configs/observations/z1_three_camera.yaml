@@ -1,7 +1,7 @@
 cameras:
-  - name: overview
-    width: 960
-    height: 720
+  - name: cam_high
+    width: 640
+    height: 480
     primary: true
   - name: top
     width: 960

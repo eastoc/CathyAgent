@@ -58,8 +58,10 @@
       <geom name="container_back" class="tray" pos="0 0.089 0.037" size="0.095 0.004 0.037"/>
       <site name="place_target" pos="0 0 0.10" size="0.006" rgba="1 0.8 0.2 0" group="4"/>
     </body>
-    <camera name="overview" pos="0.90 -0.95 1.65"
-      xyaxes="0.748259907 0.663405691 0 -0.351537796 0.396501933 0.848060962" fovy="55"/>
+    <!-- UnifoLM-WMA Z1 使用固定高位主相机 cam_high。收紧视野并对准桌面操作区，
+         避免把大面积桌沿和背景送入策略。 -->
+    <camera name="cam_high" pos="0.70 -0.75 1.35"
+      xyaxes="0.731055268 0.682318250 0 -0.331384205 0.355054505 0.874140039" fovy="48"/>
     <camera name="top" pos="0.04 0.02 1.85" xyaxes="1 0 0 0 1 0" fovy="58"/>
   </worldbody>
 </mujoco>

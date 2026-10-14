@@ -1,0 +1,9 @@
+# 默认原生 ALOHA；现有 agent 环境无需重装。实测 MuJoCo3.10 / NumPy2.2.6。
+# 旧 Panda/LIBERO 如需运行，使用单独环境和 requirements-libero.txt。
+mujoco>=3.3,<4
+numpy>=1.26,<3
+fastmcp==3.2.4
+pillow>=10
+pyyaml>=6.0
+jsonschema>=4.20
+openai>=2.0

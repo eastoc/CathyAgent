@@ -121,6 +121,30 @@ class MujocoBackend:
     def tcp_rotation(self) -> np.ndarray:
         return self.data.site_xmat[self.tcp_id].reshape(3, 3).copy()
 
+    def bilateral_gripper_contact(self) -> bool:
+        """两个夹爪垫接触同一外部刚体时，视为抓取接触。"""
+
+        fixed_prefix = "fixed_pad_"
+        moving_prefix = "moving_pad_"
+        fixed_bodies: set[int] = set()
+        moving_bodies: set[int] = set()
+        for contact in self.data.contact[: self.data.ncon]:
+            geom1 = int(contact.geom1)
+            geom2 = int(contact.geom2)
+            name1 = self.model.geom(geom1).name or ""
+            name2 = self.model.geom(geom2).name or ""
+            body1 = int(self.model.geom_bodyid[geom1])
+            body2 = int(self.model.geom_bodyid[geom2])
+            if name1.startswith(fixed_prefix):
+                fixed_bodies.add(body2)
+            if name2.startswith(fixed_prefix):
+                fixed_bodies.add(body1)
+            if name1.startswith(moving_prefix):
+                moving_bodies.add(body2)
+            if name2.startswith(moving_prefix):
+                moving_bodies.add(body1)
+        return bool(fixed_bodies & moving_bodies)
+
     def base_pose(self) -> tuple[np.ndarray, np.ndarray]:
         return (
             self.data.xpos[self.base_body_id].copy(),

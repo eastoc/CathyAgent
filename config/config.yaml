@@ -10,9 +10,9 @@ LLM:
   roles:
     - policy
 
-# robot_harness：纯 VLM 策略运行时，不加载/注册/暴露插件工具、Skills、MCP 和 Subagents。
-# 如需恢复通用 Agent 能力，改为 general。
-RUNTIME_PROFILE: robot_harness
+# general：启用插件工具、Skills、MCP 和 Subagents。
+# robot_harness 是纯 VLM 策略运行时，会跳过 MCP 注册。
+RUNTIME_PROFILE: general
 
 TAVILY_API_KEY: ${TAVILY_API_KEY}
 
@@ -36,28 +36,18 @@ SESSION:
 # - Time MCP：官方实现为 Python 包 `mcp-server-time`（npm 上 **没有**
 #   `@modelcontextprotocol/server-time`，用 npx 会 404）；见下方 `time` 段。
 MCP:
-  enabled: false
-  connect_timeout_sec: 60      # 启动期连接 + tools/list 的总超时
-  call_timeout_sec: 120        # 单次工具调用超时
+  enabled: true
+  connect_timeout_sec: 120     # AutoDL 冷启动时，连接 + tools/list 可能较慢
+  call_timeout_sec: 300        # VLA 推理与动作执行允许更长时间
   # 可选：FastMCP Client 暴露给 MCP 服务的 roots（filesystem 会回调 list_roots）。
   # 省略时自动从各 server 的 `@modelcontextprotocol/server-filesystem` 命令行路径推断。
   # roots:
   #   - /tmp
   #   - file:///Users/me/project
   mcp_servers:
-    fs:
-      command: npx
-      args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/east_wu/EastProject/CAD"]
-      env: {}
-    memory:
-      command: npx
-      args: ["-y", "@modelcontextprotocol/server-memory"]
-      env: {}
-    # 需 `pip install mcp-server-time`（已写入 requirements.txt）
-    time:
-      command: python
-      args: ["-m", "mcp_server_time"]
-      env: {}
+    robot_vla:
+      # AutoDL 自定义服务映射；FastMCP Streamable HTTP 默认端点为 /mcp。
+      url: "https://u548917-0xtl-dfab8bd0.westb.seetacloud.com:8443/mcp"
   # 示例：
   # mcp_servers:
   #   fs:

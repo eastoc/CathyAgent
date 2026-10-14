@@ -1,0 +1,91 @@
+<mujoco model="Unitree G1 open kitchen navigation">
+  <compiler angle="radian" meshdir="g1/assets"/>
+  <include file="g1/g1.xml"/>
+
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic"/>
+
+  <visual>
+    <global azimuth="135" elevation="-26" offwidth="1280" offheight="960"/>
+    <headlight ambient="0.35 0.35 0.35" diffuse="0.72 0.72 0.72" specular="0.18 0.18 0.18"/>
+    <rgba haze="0.72 0.78 0.84 1"/>
+    <map znear="0.01" zfar="18"/>
+    <quality shadowsize="2048"/>
+  </visual>
+
+  <statistic center="3 0 1.0" extent="4.8"/>
+
+  <default>
+    <default class="kitchen-static">
+      <geom friction="1.0 0.01 0.001" condim="4" solref="0.01 1" solimp="0.95 0.99 0.001"/>
+    </default>
+  </default>
+
+  <asset>
+    <texture name="sky" type="skybox" builtin="gradient" rgb1="0.78 0.86 0.94" rgb2="0.28 0.38 0.52"
+             width="512" height="3072"/>
+    <texture name="floor_tiles" type="2d" builtin="checker" mark="edge"
+             rgb1="0.72 0.70 0.65" rgb2="0.86 0.84 0.79" markrgb="0.55 0.53 0.49"
+             width="512" height="512"/>
+    <material name="floor_mat" texture="floor_tiles" texrepeat="8 6" texuniform="true" reflectance="0.04"/>
+    <material name="wall_mat" rgba="0.91 0.90 0.86 1"/>
+    <material name="cabinet_mat" rgba="0.25 0.34 0.39 1"/>
+    <material name="countertop_mat" rgba="0.82 0.79 0.71 1" specular="0.25" shininess="0.35"/>
+    <material name="island_mat" rgba="0.48 0.57 0.60 1"/>
+    <material name="fridge_mat" rgba="0.70 0.73 0.75 1" specular="0.45" shininess="0.55"/>
+    <material name="bin_mat" rgba="0.12 0.14 0.15 1"/>
+  </asset>
+
+  <worldbody>
+    <light pos="2.5 0 4.8" dir="0 0 -1" directional="true" diffuse="0.78 0.78 0.76"/>
+    <light pos="5.8 -2.0 3.2" dir="-0.4 0.25 -1" diffuse="0.46 0.48 0.52" castshadow="false"/>
+
+    <!-- 8 m x 6 m flat navigation floor enclosed by four walls. -->
+    <geom name="floor" class="kitchen-static" type="box" pos="3 0 -0.05" size="4 3 0.05" material="floor_mat"/>
+    <geom name="north_wall" class="kitchen-static" type="box" pos="3 2.94 1.2" size="4 0.06 1.2" material="wall_mat"/>
+    <geom name="south_wall" class="kitchen-static" type="box" pos="3 -2.94 1.2" size="4 0.06 1.2" material="wall_mat"/>
+    <geom name="west_wall" class="kitchen-static" type="box" pos="-0.94 0 1.2" size="0.06 3 1.2" material="wall_mat"/>
+    <geom name="east_wall" class="kitchen-static" type="box" pos="6.94 0 1.2" size="0.06 3 1.2" material="wall_mat"/>
+
+    <!-- Back-counter run and sink. -->
+    <body name="back_counter" pos="3.4 2.48 0">
+      <geom name="back_counter_base" class="kitchen-static" type="box" pos="0 0 0.43" size="2.35 0.38 0.43" material="cabinet_mat"/>
+      <geom name="back_counter_top" class="kitchen-static" type="box" pos="0 0 0.89" size="2.42 0.43 0.035" material="countertop_mat"/>
+      <geom name="sink_basin" type="box" pos="0 0 0.93" size="0.38 0.25 0.015"
+            rgba="0.28 0.32 0.34 1" contype="0" conaffinity="0"/>
+      <geom name="faucet" type="capsule" fromto="0 0.26 0.93 0 0.26 1.25" size="0.025"
+            rgba="0.55 0.58 0.60 1" contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- Central island creates two equivalent routes for A*. -->
+    <body name="kitchen_island" pos="3.35 0 0">
+      <geom name="island_base" class="kitchen-static" type="box" pos="0 0 0.43" size="1.20 0.50 0.43" material="island_mat"/>
+      <geom name="island_top" class="kitchen-static" type="box" pos="0 0 0.89" size="1.28 0.58 0.035" material="countertop_mat"/>
+    </body>
+
+    <!-- Refrigerator and a low obstacle exercise tall/short obstacle mapping. -->
+    <body name="refrigerator" pos="6.30 2.02 0">
+      <geom name="fridge_body" class="kitchen-static" type="box" pos="0 0 0.93" size="0.43 0.43 0.93" material="fridge_mat"/>
+      <geom name="fridge_handle" type="capsule" fromto="-0.32 -0.445 0.90 -0.32 -0.445 1.50" size="0.018"
+            rgba="0.24 0.26 0.27 1" contype="0" conaffinity="0"/>
+    </body>
+    <body name="trash_bin" pos="5.35 -2.18 0">
+      <geom name="trash_bin_geom" class="kitchen-static" type="cylinder" pos="0 0 0.28" size="0.25 0.28" material="bin_mat"/>
+    </body>
+
+    <!-- Navigation markers are visual-only and excluded from collision. -->
+    <site name="nav_start" type="cylinder" pos="0 0 0.012" size="0.22 0.01" rgba="0.20 0.55 1.0 0.55" group="4"/>
+    <site name="goal_fridge" type="cylinder" pos="5.55 1.82 0.012" size="0.22 0.01" rgba="0.20 0.90 0.35 0.62" group="4"/>
+    <site name="goal_sink" type="cylinder" pos="3.40 1.66 0.012" size="0.22 0.01" rgba="1.0 0.72 0.15 0.62" group="4"/>
+    <site name="goal_island_south" type="cylinder" pos="3.35 -1.10 0.012" size="0.22 0.01" rgba="0.85 0.30 0.85 0.62" group="4"/>
+
+    <camera name="kitchen_overview" pos="3 -7.2 5.4" xyaxes="1 0 0 0 0.60 0.80" fovy="52"/>
+    <camera name="kitchen_top" pos="3 0 8.5" xyaxes="1 0 0 0 1 0" fovy="50"/>
+  </worldbody>
+
+  <keyframe>
+    <!-- G1 starts near the west wall, facing +X toward the island. -->
+    <key name="open_kitchen_start"
+         qpos="0 0 0.79 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.2 0.2 0 1.28 0 0 0 0.2 -0.2 0 1.28 0 0 0"
+         ctrl="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.2 0.2 0 1.28 0 0 0 0.2 -0.2 0 1.28 0 0 0"/>
+  </keyframe>
+</mujoco>

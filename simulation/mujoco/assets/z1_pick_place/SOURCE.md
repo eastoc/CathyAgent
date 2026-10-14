@@ -17,4 +17,8 @@ for this deterministic simulation fixture; they are not measurements or
 validated identification of real Unitree hardware. The wrist camera housing
 and bracket are visual only: they add no mass or collision geometry.
 
+`scene_red_cup.xml` is a separate UnifoLM-WMA benchmark fixture. It keeps the
+same robot, table and cameras, but presents one graspable red cup so the first
+policy check matches the single task in the public Z1 checkpoint dataset.
+
 The original `../unitree_z1` model files remain unchanged.

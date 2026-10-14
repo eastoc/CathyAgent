@@ -1,5 +1,8 @@
 # CathyAgent MuJoCo Runtime
 
+新增 ALOHA 双臂 + π0.5 MCP 模式：`mjpython -m simulation.mujoco --control-mode vla_mcp --agent`。
+场景、独立依赖和验证状态见 [VLA 使用说明](vla/README.md)。下文描述原 Z1 直接控制模式。
+
 ## 结论
 
 第一版采用“CathyAgent 主导、多轮工具调用、MuJoCo 同进程运行”的架构。环境基于 RobotTest 的 Unitree Z1 三色方块物理抓取场景，不使用 UR5，也不要求 CathyAgent 核心维护 action chunk。
@@ -7,12 +10,13 @@
 ## 核心特性
 
 - **Agent 主导闭环**：CathyAgent 维护任务上下文，按照“观察 → 单步动作 → 执行反馈 → 再观察”持续驱动 MuJoCo，而不是由仿真循环反向调用 Agent。
+- **Z1 WMA 高层工具**：`robot_pick` 直接调用 AutoDL 上的 UnifoLM-WMA 并在工具内部循环推理/执行，`robot_release` 与 `robot_move_to` 只调用本地控制器；不引入 MCP。
 - **VLM 末端位姿控制**：`robot_move_ee` 接收单个 TCP 目标点和可选四元数；IK、轨迹插值、关节控制和物理步进由本地控制器完成，不要求模型输出 action chunk。
 - **动态环境发现**：Agent 可通过 `robot_describe` 获取 `base_frame`、workspace、相机、控制频率、单位和夹爪约定，无需把仿真参数硬编码进模型接口。
 - **多模态观测**：`robot_observe` 返回关节/TCP 状态、相机标定及 RGB 图像；图像以 SHA-256 Artifact 持久化，并可继续作为模型上下文使用。
 - **实时图形 Viewer**：创建 Runtime 时自动打开 MuJoCo 被动 Viewer；状态修改使用 Viewer lock，每个控制周期结束后同步画面。
 - **异步串行 Runtime**：MuJoCo `model/data` 由独占线程持有，Agent 工具通过异步队列调用，支持超时、取消、动作预算和快照编号。
-- **流式可观测性**：REPL 实时打印模型文本、工具参数、工具结果、耗时和图像 Artifact ID；完整事件同时写入 `outputs/sessions.db`。
+- **流式可观测性**：REPL 实时打印模型请求轮次、接口返回的推理/摘要、模型正文、工具参数、工具结果、耗时和图像 Artifact ID；完整事件同时写入 `outputs/sessions.db`。
 - **配置与核心解耦**：环境 YAML、机器人/控制器/观测配置、MJCF、网格、截图、测试和输出均位于 `simulation/mujoco/`，不侵占 CathyAgent 主配置目录。
 - **物理抓取回归**：内置 Unitree Z1 红、蓝、绿三色方块抓取放置场景，并使用真实接触进行连续物理回归。
 - **评测状态隔离**：物体真值和容器判定只存在于 `evaluation.py`，不注册为 Agent 工具，避免策略读取特权仿真状态。
@@ -36,8 +40,9 @@ MuJoCo Viewer 会随 Runtime 创建，并实时同步机械臂、夹爪、方块
 ```text
 用户指令
   -> CathyAgent Agent loop
-     -> robot_describe / robot_observe / robot_move_ee / robot_set_gripper / robot_wait
+     -> robot_pick / robot_release / robot_move_to / robot_observe
         -> MujocoToolPlugin
+           -> unitree_z1_tools（AutoDL HTTP 客户端 + 抓取闭环）
            -> MujocoRuntime（队列 + 独占线程，唯一持有 model/data）
               -> MujocoBackend（MJCF、step、状态校验）
               -> Z1Controller（末端位姿 -> IK -> 50 Hz 关节控制）
@@ -69,6 +74,7 @@ simulation/mujoco/
 ├── observation.py           # 相机/本体观测
 ├── runtime.py               # 独占线程与异步命令
 ├── plugin.py / plugin.yaml  # CathyAgent 工具适配
+├── unitree_z1_tools/        # UnifoLM-WMA 客户端与 Z1 高层工具
 ├── agent_runtime.py         # 独立 Agent 装配入口
 └── evaluation.py            # 非工具化的特权评分器
 ```
@@ -95,7 +101,20 @@ mjpython -m simulation.mujoco --agent
 python -m unittest discover -s simulation/mujoco/tests -v
 ```
 
-Agent REPL 会实时打印模型文本、每次工具调用的参数、结构化工具结果、耗时和图像 Artifact ID；完整事件仍同时持久化到 `outputs/sessions.db`。
+Z1 工具默认连接
+`https://u548917-epls-671d4d59.westd.seetacloud.com:8443/predict_action`。
+需要切换服务或相机时，在启动前设置：
+
+```bash
+export UNIFOLM_WMA_URL=https://your-autodl-host:port
+export UNIFOLM_WMA_TIMEOUT_SECONDS=600
+export UNIFOLM_WMA_CAMERA=cam_high
+mjpython -m simulation.mujoco --agent
+```
+
+Agent REPL 会实时打印模型请求轮次、接口返回的推理/摘要、模型正文、每次工具调用的参数、结构化工具结果、耗时和图像 Artifact ID。推理/摘要仅在模型接口实际返回对应内容时显示，不保证提供完整 CoT；没有推理事件时仍正常显示正文和工具结果。
+
+模块入口将普通运行日志输出到 stderr 和 `outputs/logs/`；终端流式文本由独立渲染逻辑打印，不会自动复制到 `.log`。完整运行事件继续持久化到 `outputs/sessions.db`，图像保存在 `outputs/artifacts/`。
 
 默认环境配置 `runtime.viewer.enabled: true`，创建 Runtime 后立即打开被动 Viewer；物理状态修改持有 Viewer lock，每个 50 Hz 控制步完成后调用 `sync()`，关闭 Runtime 时窗口也会关闭。macOS 必须通过 `mjpython` 启动；CI 或纯 headless 环境传 `--no-viewer`。离屏 RGB 在无 GPU 的 Linux 上可按 [MuJoCo Python 文档](https://mujoco.readthedocs.io/en/stable/python.html) 配置 EGL/OSMesa。
 
@@ -106,12 +125,17 @@ Agent REPL 会实时打印模型文本、每次工具调用的参数、结构化
 - `robot_move_ee(frame, position, quaternion_wxyz?, duration_seconds?)`：一个末端目标点，不是 action chunk。
 - `robot_set_gripper(opening)`：`0` 闭合，`1` 张开。
 - `robot_wait(sim_seconds)`：保持命令并推进仿真时间，不做墙钟 sleep。
+- `robot_pick(object_name, instruction?, max_rounds?, execute_steps?)`：当前只支持 `object_name="red cup"`，固定使用训练内指令 `Pick up the red cup on the table.`；每轮默认执行完整 16 步 action chunk，只有双侧接触且抬升后仍保持接触才返回成功。
+- `robot_release()`：使用本地控制器完全松开夹爪，不调用模型。
+- `robot_move_to(frame, position, quaternion_wxyz?, duration_seconds?)`：使用本地 IK 移动末端，不调用模型。
 
 Workspace 是安全包围盒，不代表盒内每个点在给定姿态下都满足 IK；不可达目标会返回 `ik_failed`，Agent 应重新观察并选择中间点。
 
 ## 配置与扩展
 
-默认入口是 `configs/environments/z1_three_cube.yaml`，它组合：
+交互式 Agent 默认入口是 `configs/environments/z1_red_cup.yaml`。这是与公开 Z1 checkpoint 单一训练任务对齐的单红杯基准：固定训练指令、官方初始关节姿态、`cam_high` 以及双侧接触后的抬升验证。
+
+确定性物理回归仍使用 `configs/environments/z1_three_cube.yaml`，它组合：
 
 - `configs/robots/unitree_z1.yaml`
 - `configs/controllers/z1_differential_ik.yaml`

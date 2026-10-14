@@ -1,0 +1,48 @@
+schema_version: 1
+environment_id: dual_panda_three_cube
+backend: robosuite_dual_panda
+control_mode: vla_mcp
+
+scene:
+  seed: 7
+  table_size: [1.0, 1.0, 0.05]
+  table_height: 0.8
+  # 左臂保留 LIBERO 基准位置；右臂偏移，当前只允许单臂分时控制。
+  arm_y_offsets: [0.0, 0.55]
+  cube_half_size: 0.0175
+  cubes:
+    red: [-0.12, -0.15]
+    green: [-0.12, 0.0]
+    blue: [-0.12, 0.15]
+  box_xy: [0.15, 0.0]
+  box_inner_half_size: [0.10, 0.11]
+  box_height: 0.075
+  box_wall_thickness: 0.008
+  position_jitter: 0.0
+
+observation:
+  render_size: 256
+  policy_size: 224
+  # robosuite 1.4.1 的 OpenGL 图像，按 openpi/examples/libero/main.py 对齐。
+  policy_rotate_180: true
+  agentview_pos: [0.5886131746834771, 0.0, 1.4903500240372423]
+  agentview_quat: [0.6380177736282349, 0.3048497438430786, 0.30484986305236816, 0.6380177736282349]
+
+runtime:
+  viewer: true
+  control_hz: 20
+  settle_steps: 10
+  max_episode_steps: 2400
+
+policy:
+  # 复用 config/config.yaml 中这个服务器的 URL / headers，避免复制凭据。
+  mcp_server: robot_vla
+  tool: pi_predict
+  active_arm: left
+  # 双臂场景上的分布外实验；不声称此权重具备双臂协同能力。
+  allowed_arms: [left]
+  replan_steps: 5
+  default_skill_steps: 60
+  max_skill_steps: 400
+  inference_timeout_seconds: 45
+  skill_timeout_seconds: 240

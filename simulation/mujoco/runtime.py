@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import numpy as np
+
 from cathy.artifacts import LocalArtifactStore
 
 from simulation.contracts import ExecutionResult, Pose
@@ -142,6 +144,34 @@ class MujocoRuntime:
             message=message,
         )
 
+    def _gripper_status(self, closed_threshold: float) -> dict[str, Any]:
+        robot = self.config.robot
+        gripper_q = float(self._backend.robot_qpos()[-1])
+        span = robot.gripper_close_control - robot.gripper_open_control
+        closed_ratio = float(
+            np.clip((gripper_q - robot.gripper_open_control) / span, 0, 1)
+        )
+        model_state = closed_ratio * 2.0 - 1.0
+        bilateral_contact = self._backend.bilateral_gripper_contact()
+        gripper_closed = bool(
+            model_state >= closed_threshold or bilateral_contact
+        )
+        return {
+            "status": "succeeded",
+            "snapshot_id": self._snapshot_id,
+            "sim_time": self._backend.sim_time,
+            "gripper_model_state": model_state,
+            "bilateral_gripper_contact": bilateral_contact,
+            "gripper_closed": gripper_closed,
+            "termination": (
+                "bilateral_contact"
+                if bilateral_contact
+                else "closed_position"
+                if gripper_closed
+                else None
+            ),
+        }
+
     def _dispatch(
         self,
         operation: str,
@@ -156,6 +186,22 @@ class MujocoRuntime:
                 snapshot_id=self._snapshot_id,
                 cameras=params.get("cameras"),
                 render=bool(params.get("render", True)),
+            )
+        if operation == "policy_observe":
+            observation = self._observation.capture_policy(
+                snapshot_id=self._snapshot_id,
+                camera=str(params["camera"]),
+                width=int(params["width"]),
+                height=int(params["height"]),
+            )
+            return {
+                "state": observation.state,
+                "image": observation.image,
+                "snapshot_id": observation.snapshot_id,
+            }
+        if operation == "gripper_status":
+            return self._gripper_status(
+                float(params.get("closed_threshold", 0.8))
             )
         if operation == "reset":
             self._backend.reset()
@@ -183,6 +229,16 @@ class MujocoRuntime:
         if operation == "set_gripper":
             self._controller.set_gripper(float(params["opening"]), cancel=cancel)
             return self._state_change_result("夹爪命令已执行")
+        if operation == "joint_action":
+            target = np.asarray(params["target"], dtype=float)
+            duration = float(params.get("duration_seconds", 1.0 / 30.0))
+            closed_threshold = float(params.get("closed_threshold", 0.8))
+            self._controller.move_joints(target, seconds=duration, cancel=cancel)
+            status = self._gripper_status(closed_threshold)
+            return {
+                **status,
+                "joint_positions": self._backend.robot_qpos().tolist(),
+            }
         if operation == "wait":
             self._controller.hold(float(params["sim_seconds"]), cancel=cancel)
             return self._state_change_result("仿真时间已推进")

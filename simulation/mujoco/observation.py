@@ -44,6 +44,15 @@ class ObservationResult:
     images: tuple[ImageBlock, ...]
 
 
+@dataclass(frozen=True)
+class PolicyObservation:
+    """仅供本地策略工具使用，不进入 Agent 上下文或 Artifact Store。"""
+
+    state: np.ndarray
+    image: np.ndarray
+    snapshot_id: int
+
+
 class Z1ObservationProvider:
     def __init__(
         self,
@@ -56,6 +65,25 @@ class Z1ObservationProvider:
         self.artifact_store = artifact_store
         self._cameras = {camera.name: camera for camera in config.cameras}
         self._renderers: dict[tuple[int, int], Any] = {}
+
+    def _render_rgb(self, camera_name: str, *, width: int, height: int) -> np.ndarray:
+        try:
+            key = (width, height)
+            renderer = self._renderers.get(key)
+            if renderer is None:
+                renderer = self.backend.mujoco.Renderer(
+                    self.backend.model,
+                    height=height,
+                    width=width,
+                )
+                self._renderers[key] = renderer
+            renderer.update_scene(self.backend.data, camera=camera_name)
+            return np.ascontiguousarray(renderer.render().copy())
+        except Exception as exc:
+            raise MujocoExecutionError(
+                "RGB 渲染失败；macOS 无图形会话时请在桌面终端运行，"
+                "无 GPU 的 Linux 请配置 EGL/OSMesa，或传 render=false"
+            ) from exc
 
     def _camera_info(self, camera: CameraConfig) -> dict[str, Any]:
         model, data = self.backend.model, self.backend.data
@@ -131,23 +159,11 @@ class Z1ObservationProvider:
         image_blocks: list[ImageBlock] = []
         for name in requested:
             camera = self._cameras[name]
-            try:
-                key = (camera.width, camera.height)
-                renderer = self._renderers.get(key)
-                if renderer is None:
-                    renderer = backend.mujoco.Renderer(
-                        backend.model,
-                        height=camera.height,
-                        width=camera.width,
-                    )
-                    self._renderers[key] = renderer
-                renderer.update_scene(backend.data, camera=name)
-                rgb = renderer.render().copy()
-            except Exception as exc:
-                raise MujocoExecutionError(
-                    "RGB 渲染失败；macOS 无图形会话时请在桌面终端运行，"
-                    "无 GPU 的 Linux 请配置 EGL/OSMesa，或传 render=false"
-                ) from exc
+            rgb = self._render_rgb(
+                name,
+                width=camera.width,
+                height=camera.height,
+            )
             ref = self.artifact_store.put_bytes(
                 encode_png(rgb),
                 mime_type="image/png",
@@ -164,6 +180,24 @@ class Z1ObservationProvider:
                 )
             )
         return ObservationResult(state=state, images=tuple(image_blocks))
+
+    def capture_policy(
+        self,
+        *,
+        snapshot_id: int,
+        camera: str,
+        width: int,
+        height: int,
+    ) -> PolicyObservation:
+        if camera not in self._cameras:
+            raise MujocoExecutionError(f"未知策略相机: {camera}")
+        if width <= 0 or height <= 0:
+            raise MujocoExecutionError("策略图像尺寸必须大于 0")
+        return PolicyObservation(
+            state=self.backend.robot_qpos().astype(np.float32),
+            image=self._render_rgb(camera, width=width, height=height),
+            snapshot_id=snapshot_id,
+        )
 
     def close(self) -> None:
         for renderer in self._renderers.values():

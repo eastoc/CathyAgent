@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from cathy.contracts import ToolResult
 from cathy.plugins import PluginError, ToolPlugin
 from cathy.plugins.manifest import Execution, PluginManifest, ToolSpec
 
@@ -21,18 +22,30 @@ from .client import McpError, McpHub
 class McpToolPlugin(ToolPlugin):
     """把所有 MCP 工具聚合在一个 plugin 实例下。"""
 
-    def __init__(self, hub: McpHub) -> None:
+    def __init__(self, hub: McpHub, *, artifact_store=None) -> None:
         self._hub = hub
+        self._artifact_store = artifact_store
 
     def initialize(self, config: dict[str, Any]) -> None:
         # 真正的连接生命周期由 McpHub 自己持有；插件这层不重复 init。
         return None
 
-    def execute(self, tool_name: str, params: dict[str, Any]) -> str:
+    def execute(self, tool_name: str, params: dict[str, Any]) -> str | ToolResult:
         try:
+            if self._artifact_store is not None:
+                from .content import convert_result
+                return convert_result(self._hub.call_tool_raw(tool_name, params), tool_name, self._artifact_store)
             return self._hub.call_tool(tool_name, params or {})
         except McpError as exc:
             raise PluginError(str(exc)) from exc
+
+    async def aexecute(self, tool_name: str, params: dict[str, Any]):
+        from .client import _render_call_result
+        from .content import convert_result
+        result = await self._hub.acall_tool_raw(tool_name, params)
+        if self._artifact_store is None:
+            return _render_call_result(result)
+        return convert_result(result, tool_name, self._artifact_store)
 
     def shutdown(self) -> None:
         self._hub.shutdown()
