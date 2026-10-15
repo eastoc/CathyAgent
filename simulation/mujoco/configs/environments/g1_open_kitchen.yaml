@@ -1,0 +1,34 @@
+environment_id: g1_open_kitchen
+model_path: assets/g1_open_kitchen/scene.xml
+initial_pose_xy_yaw: [0.0, 0.0, 0.0]
+execution_enabled: false
+
+navigation:
+  metadata_path: assets/g1_open_kitchen/navigation.yaml
+  map_version: g1-open-kitchen-v1
+
+robot:
+  profile_version: g1-sonic-slow-walk-v1
+  # 圆形保守包络：身体/摆臂扫掠范围与安全余量合计。
+  inflation_radius_m: 0.45
+  clearance_cost_margin_m: 0.20
+  # 仅供执行跟踪横摆使用；目标点和 A* 仍采用完整 0.45m 膨胀半径。
+  execution_clearance_tolerance_m: 0.10
+
+rendering:
+  scale: 5
+
+sonic:
+  # 本进程作为 PUB，官方 zmq_manager 连接此端口订阅 command/planner。
+  publish_endpoint: tcp://*:5556
+  bind: true
+  # MuJoCo 进程发布根位姿，本 Agent 订阅，避免用命令积分冒充真实位置。
+  pose_endpoint: tcp://localhost:5558
+  pose_topic: g1_nav_pose
+  command_hz: 20.0
+  slow_walk_speed_mps: 0.35
+  waypoint_tolerance_m: 0.20
+  goal_position_tolerance_m: 0.12
+  goal_yaw_tolerance_rad: 0.15
+  pose_timeout_seconds: 0.5
+  execution_timeout_seconds: 120.0

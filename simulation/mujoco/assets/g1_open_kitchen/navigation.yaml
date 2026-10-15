@@ -8,6 +8,24 @@ map:
 robot_start:
   position_xy_m: [0.0, 0.0]
   yaw_rad: 0.0
+landmarks:
+  - name: fridge
+    label: 冰箱
+    geom: fridge_body
+    navigable_surface: false
+  - name: sink
+    label: 水槽
+    geom: back_counter_top
+    navigable_surface: false
+  - name: island
+    label: 中央岛台
+    geom: island_top
+    navigable_surface: false
+  - name: trash_bin
+    label: 垃圾桶
+    geom: trash_bin_geom
+    navigable_surface: false
+# 以下固定点只用于物理回归。Agent 正式导航必须从 get_map 选择地面坐标。
 targets:
   - name: fridge
     site: goal_fridge

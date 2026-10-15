@@ -1,0 +1,4 @@
+# 在 Isaac-GR00T 的 uv 环境里安装；torch/transformers 等由上游 uv.lock 管理。
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+Pillow>=10

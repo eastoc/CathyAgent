@@ -1,0 +1,49 @@
+name: g1_navigation
+version: 0.1.0
+description: Unitree G1 已知地图导航；Agent 查看膨胀地图后提交地面坐标和世界系朝向。
+
+tools:
+  - name: get_map
+    description: 查看静态二维地图、G1 当前位姿、机器人膨胀禁区、当前连通可达区和语义地标。选择目的地前必须调用。
+    input_schema:
+      type: object
+      properties: {}
+      required: []
+      additionalProperties: false
+    side_effect: none
+    timeout_seconds: 30
+    concurrency_key: g1_map
+    max_concurrency: 1
+
+  - name: navigate
+    description: 导航到 world 坐标系中的二维地面点并以指定 yaw 停稳。执行前强制检查实体占据、膨胀半径、连通性和 A* 路径；不可达时不会启动运动。
+    input_schema:
+      type: object
+      properties:
+        goal_xy_m:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items:
+            type: number
+        goal_yaw_rad:
+          type: number
+          minimum: -3.141592653589793
+          maximum: 3.141592653589793
+      required: [goal_xy_m, goal_yaw_rad]
+      additionalProperties: false
+    execution_mode: background
+    side_effect: reversible
+    cancellable: true
+    timeout_seconds: 180
+    concurrency_key: g1_motion
+    max_concurrency: 1
+
+permissions: {}
+execution:
+  runtime: python
+  entrypoint: plugin:G1NavigationToolPlugin
+  timeout_seconds: 180
+  sandbox: false
+metadata:
+  trust_level: builtin

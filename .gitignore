@@ -3,6 +3,7 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+third_party/
 workspaces/
 data/
 tests/
@@ -229,3 +230,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local third-party runtimes and downloaded model weights
+third_party/GR00T-WholeBodyControl/

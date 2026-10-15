@@ -1,0 +1,31 @@
+environment_id: g1_open_kitchen
+model_path: assets/g1_open_kitchen/scene.xml
+initial_pose_xy_yaw: [0.0, 0.0, 0.0]
+execution_enabled: true
+
+navigation:
+  metadata_path: assets/g1_open_kitchen/navigation.yaml
+  map_version: g1-open-kitchen-v1
+
+robot:
+  profile_version: g1-sonic-slow-walk-v1
+  inflation_radius_m: 0.45
+  clearance_cost_margin_m: 0.20
+  # 允许步态横摆短暂进入外层安全缓冲，硬净空仍为 0.35m。
+  execution_clearance_tolerance_m: 0.10
+
+rendering:
+  scale: 5
+
+sonic:
+  publish_endpoint: tcp://*:5556
+  bind: true
+  pose_endpoint: tcp://localhost:5558
+  pose_topic: g1_nav_pose
+  command_hz: 20.0
+  slow_walk_speed_mps: 0.35
+  waypoint_tolerance_m: 0.20
+  goal_position_tolerance_m: 0.12
+  goal_yaw_tolerance_rad: 0.15
+  pose_timeout_seconds: 0.5
+  execution_timeout_seconds: 120.0

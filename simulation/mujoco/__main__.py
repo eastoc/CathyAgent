@@ -128,7 +128,11 @@ async def _stream_agent_turn(agent, session, user_input: str) -> None:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="CathyAgent MuJoCo runtime")
     parser.add_argument("--environment", default=None)
-    parser.add_argument("--control-mode", choices=["local_direct", "vla_mcp"], default="local_direct")
+    parser.add_argument(
+        "--control-mode",
+        choices=["local_direct", "vla_mcp", "g1_navigation"],
+        default="local_direct",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--describe", action="store_true", help="打印环境能力")
     mode.add_argument("--observe", action="store_true", help="打印无图像状态观测")
@@ -149,16 +153,46 @@ def _parse_args() -> argparse.Namespace:
         from .vla.config import DEFAULT_VLA_ENVIRONMENT
         if args.control_mode == "vla_mcp":
             args.environment = DEFAULT_VLA_ENVIRONMENT
+        elif args.control_mode == "g1_navigation":
+            from .g1.config import DEFAULT_G1_ENVIRONMENT
+
+            args.environment = DEFAULT_G1_ENVIRONMENT
         elif args.agent:
             args.environment = DEFAULT_WMA_ENVIRONMENT
         else:
             args.environment = DEFAULT_ENVIRONMENT
     if args.control_mode == "vla_mcp" and args.scripted:
         parser.error("--scripted 是 Z1 特权回归入口，不用于 VLA 场景")
+    if args.control_mode == "g1_navigation" and args.scripted:
+        parser.error("--scripted 是 Z1 特权回归入口，不用于 G1 导航")
     return args
 
 
 def _run_diagnostic(args: argparse.Namespace) -> None:
+    if args.control_mode == "g1_navigation":
+        from .g1.config import load_g1_navigation_config
+        from .g1.service import G1NavigationService
+
+        service = G1NavigationService(load_g1_navigation_config(args.environment))
+        try:
+            if args.observe:
+                print(_json(service.get_map().metadata))
+            else:
+                print(
+                    _json(
+                        {
+                            "environment_id": service.config.environment_id,
+                            "capabilities": ["get_map", "navigate"],
+                            "frame": service.context.frame,
+                            "map_version": service.context.map_version,
+                            "inflation_radius_m": service.context.inflation_radius_m,
+                            "execution_enabled": service.config.execution_enabled,
+                        }
+                    )
+                )
+        finally:
+            service.close()
+        return
     if args.control_mode == "vla_mcp":
         from .vla.config import load_vla_config
         from .vla.runtime import PandaRuntime
@@ -227,8 +261,9 @@ async def _run_agent(args: argparse.Namespace) -> None:
     try:
         session = await runtime.store.aget_or_create(args.session)
         runtime.agent.tools.attach_session(session.id)
+        task_kind = "G1 导航" if args.control_mode == "g1_navigation" else "manipulation"
         print(
-            "CathyAgent MuJoCo · 输入 manipulation 指令；"
+            f"CathyAgent MuJoCo · 输入 {task_kind} 指令；"
             "输入 quit / exit / q 退出\n"
             f"session={session.id} tools="
             f"{[item.name for item in runtime.agent.tools.list_tools()]}"

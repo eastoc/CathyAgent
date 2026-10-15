@@ -54,11 +54,11 @@ async def build_simulation_agent(
     viewer_enabled: bool | None = None,
     control_mode: str = "local_direct",
 ) -> SimulationAgentRuntime:
-    """装配 Z1 直接控制或 ALOHA/Panda VLA MCP；不加载通用插件。"""
+    """装配 Z1、VLA 或 G1 静态地图导航；不加载通用插件。"""
     resolved_cfg = dict(cfg) if cfg is not None else load_config()
     root = Path(output_root).resolve()
     artifacts = LocalArtifactStore(root / "artifacts")
-    if control_mode not in {"local_direct", "vla_mcp"}:
+    if control_mode not in {"local_direct", "vla_mcp", "g1_navigation"}:
         raise ValueError(f"未知 control_mode: {control_mode}")
     if control_mode == "vla_mcp" and environment in {
         DEFAULT_ENVIRONMENT,
@@ -66,9 +66,17 @@ async def build_simulation_agent(
     }:
         from .vla.config import DEFAULT_VLA_ENVIRONMENT
         environment = DEFAULT_VLA_ENVIRONMENT
+    if control_mode == "g1_navigation" and environment in {
+        None,
+        DEFAULT_ENVIRONMENT,
+        DEFAULT_WMA_ENVIRONMENT,
+    }:
+        from .g1.config import DEFAULT_G1_ENVIRONMENT
+
+        environment = DEFAULT_G1_ENVIRONMENT
     z1_tools_config = load_unitree_z1_tools_config()
     registry = PluginRegistry(
-        plugins_dirs=[] if control_mode == "vla_mcp" else [MODULE_ROOT.parent],
+        plugins_dirs=[] if control_mode in {"vla_mcp", "g1_navigation"} else [MODULE_ROOT.parent],
         plugin_configs={
             "mujoco": {
                 "environment": str(environment),
@@ -78,7 +86,15 @@ async def build_simulation_agent(
             }
         },
     )
-    if control_mode == "vla_mcp":
+    if control_mode == "g1_navigation":
+        from .g1.bootstrap import register_g1_navigation
+
+        register_g1_navigation(
+            registry,
+            environment=environment,
+            artifacts=artifacts,
+        )
+    elif control_mode == "vla_mcp":
         from .vla.bootstrap import register_vla
         startup = asyncio.create_task(asyncio.to_thread(
             register_vla, registry, resolved_cfg, environment, artifacts, viewer_enabled,
@@ -106,9 +122,17 @@ async def build_simulation_agent(
 
     hooks = HookManager()
     tools = registry
+    if control_mode == "g1_navigation":
+        from .g1.prompt import G1_NAVIGATION_SYSTEM_PROMPT
+
+        system_prompt = G1_NAVIGATION_SYSTEM_PROMPT
+    elif control_mode == "vla_mcp":
+        system_prompt = VLA_AGENT_SYSTEM_PROMPT
+    else:
+        system_prompt = SIMULATION_AGENT_SYSTEM_PROMPT
     assembler = ContextAssembler(
         project_root=None,
-        system_override=VLA_AGENT_SYSTEM_PROMPT if control_mode == "vla_mcp" else SIMULATION_AGENT_SYSTEM_PROMPT,
+        system_override=system_prompt,
         tool_catalog=build_tool_catalog(tools.list_tools()),
         token_budget=int((resolved_cfg.get("SESSION") or {}).get("token_budget", 16000)),
         hooks=hooks,

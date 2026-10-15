@@ -1,0 +1,29 @@
+{
+  "id": "cathy-g1-parallel-v1",
+  "training_alignment_verified": false,
+  "provenance": "Project-defined simulation geometry; NOT a calibration supplied by NVIDIA.",
+  "control_hz": 20,
+  "camera": {
+    "name": "ego_view",
+    "parent": "torso_link",
+    "pos_m": [0.08, 0.0, 0.42],
+    "xyaxes": [0, -1, 0, 0.5735764364, 0, 0.8191520443],
+    "fovy_deg": 60,
+    "width": 640,
+    "height": 480
+  },
+  "gripper": {
+    "max_width_m": 0.08,
+    "mount_pos_m": {"left": [0.05, 0.003, 0], "right": [0.05, -0.003, 0]},
+    "mount_quat_wxyz": {"left": [1, 0, 0, 0], "right": [1, 0, 0, 0]},
+    "tcp_pos_m": [0.09, 0, 0],
+    "tcp_quat_wxyz": [1, 0, 0, 0],
+    "hand_encoding": "normalized_opening_0_closed_1_open"
+  },
+  "eef": {
+    "reference_body": "pelvis",
+    "source": "wrist",
+    "rotation_6d": "first_two_rows",
+    "note": "wrist frame and gripper TCP are separate; verify frame/rotation convention against the target dataset"
+  }
+}
