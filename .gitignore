@@ -4,6 +4,12 @@ __pycache__/
 *$py.class
 
 workspaces/
+# Local checkouts of external repositories and model dependencies
+/third_party/
+# Robot development files kept locally, outside the main branch
+/simulation/
+/tests/test_agent_async.py
+/tests/test_run_journal.py
 data/
 /data/**
 /log/
