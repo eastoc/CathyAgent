@@ -97,6 +97,7 @@ class LLMClientTest(unittest.TestCase):
     ) -> None:
         chunks = [
             SimpleNamespace(
+                id="chatcmpl-stream-1",
                 choices=[
                     SimpleNamespace(
                         delta=SimpleNamespace(
@@ -117,6 +118,7 @@ class LLMClientTest(unittest.TestCase):
                 ]
             ),
             SimpleNamespace(
+                id="chatcmpl-stream-1",
                 choices=[
                     SimpleNamespace(
                         delta=SimpleNamespace(
@@ -178,6 +180,9 @@ class LLMClientTest(unittest.TestCase):
         self.assertEqual(final.tool_calls[0].id, "call_1")
         self.assertEqual(final.tool_calls[0].name, "echo")
         self.assertEqual(final.tool_calls[0].arguments, {"msg": "hi"})
+        self.assertIsNotNone(final.next_turn_state)
+        assert final.next_turn_state is not None
+        self.assertEqual(final.next_turn_state.value, "chatcmpl-stream-1")
         kwargs = async_openai_cls.return_value.chat.completions.create.call_args.kwargs
         self.assertTrue(kwargs["stream"])
         self.assertTrue(stream.closed)
@@ -371,6 +376,7 @@ class LLMClientTest(unittest.TestCase):
             ],
         )
         openai_cls.return_value.chat.completions.create.return_value = SimpleNamespace(
+            id="chatcmpl-sync-1",
             choices=[SimpleNamespace(message=message)]
         )
 
@@ -388,6 +394,9 @@ class LLMClientTest(unittest.TestCase):
         self.assertEqual(response.tool_calls[0].id, "call_1")
         self.assertEqual(response.tool_calls[0].name, "echo")
         self.assertEqual(response.tool_calls[0].arguments, {"msg": "你好"})
+        self.assertIsNotNone(response.next_turn_state)
+        assert response.next_turn_state is not None
+        self.assertEqual(response.next_turn_state.value, "chatcmpl-sync-1")
 
         kwargs = openai_cls.return_value.chat.completions.create.call_args.kwargs
         self.assertEqual(kwargs["model"], "qwen-plus")

@@ -9,9 +9,9 @@ navigation:
 
 robot:
   profile_version: g1-sonic-slow-walk-v1
-  inflation_radius_m: 0.45
+  inflation_radius_m: 0.25
   clearance_cost_margin_m: 0.20
-  # 允许步态横摆短暂进入外层安全缓冲，硬净空仍为 0.35m。
+  # 允许步态横摆短暂进入外层安全缓冲，硬净空仍为 0.15m。
   execution_clearance_tolerance_m: 0.10
 
 rendering:

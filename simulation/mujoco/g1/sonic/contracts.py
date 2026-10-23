@@ -12,6 +12,9 @@ from ..contracts import Pose2D
 class TimedPose2D:
     pose: Pose2D
     monotonic_time: float
+    root_qpos: tuple[float, ...] | None = None
+    joint_position_hardware: tuple[float, ...] | None = None
+    motion_active: bool | None = None
 
 
 @dataclass(frozen=True)

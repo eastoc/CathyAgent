@@ -110,13 +110,8 @@ MCP:
       url: "https://u548917-0xtl-dfab8bd0.westb.seetacloud.com:8443/mcp"
 ```
 
-本地：
-
-```bash
-mjpython -m simulation.mujoco --control-mode vla_mcp --agent
-```
-
-宿主会查找新的 `pi_aloha_predict`，不会将旧 LIBERO 的7维动作交给 ALOHA。
+此后端不再通过 `simulation.mujoco` 的 `control_mode` 启动；保留部署文档以支持
+底层策略服务和回归测试。宿主不会将旧 LIBERO 的7维动作交给 ALOHA。
 本地 ALOHA 场景已真实测试；本文件的 AutoDL 新权重部署尚未替你执行。
 
 参考：[官方 ALOHA 配置](https://github.com/Physical-Intelligence/openpi/blob/main/src/openpi/training/config.py)、

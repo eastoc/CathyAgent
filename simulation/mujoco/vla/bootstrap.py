@@ -51,7 +51,7 @@ def register_vla(registry, config: dict, environment, artifacts, viewer_enabled=
     policy_cfg = env_cfg["policy"]
     mcp = config.get("MCP") or {}
     if not mcp.get("enabled"):
-        raise ValueError("vla_mcp 模式要求 MCP.enabled=true")
+        raise ValueError("VLA 后端要求 MCP.enabled=true")
     server_name = policy_cfg["mcp_server"]
     server = (mcp.get("mcp_servers") or {}).get(server_name)
     if not server:

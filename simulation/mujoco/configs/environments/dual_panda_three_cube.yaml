@@ -1,7 +1,6 @@
 schema_version: 1
 environment_id: dual_panda_three_cube
 backend: robosuite_dual_panda
-control_mode: vla_mcp
 
 scene:
   seed: 7

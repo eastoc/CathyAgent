@@ -81,6 +81,7 @@ class InProcessSonicController:
         self.policy_ticks = 0
         self.max_abs_action = 0.0
         self.active = False
+        self.motion_active = False
 
     @staticmethod
     def read_state(env: object) -> RobotState:
@@ -140,21 +141,27 @@ class InProcessSonicController:
             return
 
         if self.forced_command is not None:
-            active, command = True, self.forced_command
+            receiver_active, command = True, self.forced_command
         elif self.receiver is None:
-            active, command = False, None
+            receiver_active, command = False, None
         else:
-            active, command = self.receiver.snapshot()
+            receiver_active, command = self.receiver.snapshot()
         if command is None:
             command = PlannerCommand()
-        if active != self.active:
+        # start_planner 会让 ZMQ receiver 保持 active，停止导航时 follower 只发送
+        # mode=0。mode=0 必须退出策略推理并恢复站立保护，否则 ONNX 会继续阻塞
+        # MuJoCo 主循环，根位姿发布也会随之停止。
+        control_active = bool(receiver_active and command.mode != 0)
+        if control_active != self.active:
             print(
-                "SONIC 导航命令状态: " + ("active" if active else "idle"),
+                "SONIC 导航命令状态: "
+                + ("active" if control_active else "idle"),
                 flush=True,
             )
-        self.active = active
-        self.planner.update_command(active, command)
-        if active:
+        self.active = control_active
+        self.motion_active = control_active
+        self.planner.update_command(control_active, command)
+        if control_active:
             motion, frame = self.planner.current()
             self.history.append(state, self.last_action)
             action = self.policy.infer(motion, frame, state, self.history)

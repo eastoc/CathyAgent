@@ -61,6 +61,8 @@ class ModelClientFactoryTest(unittest.TestCase):
                 "model": "gpt-6-astra",
                 "reasoning_effort": "high",
                 "max_output_tokens": 16384,
+                "async_tools": False,
+                "use_previous_response_id": False,
                 # 共享配置中的 Chat 参数必须被 Responses 分支忽略。
                 "temperature": 0.7,
                 "max_tokens": 128000,
@@ -70,6 +72,8 @@ class ModelClientFactoryTest(unittest.TestCase):
         self.assertIsInstance(client, OpenAIResponsesClient)
         self.assertEqual(client.reasoning_effort, "high")
         self.assertEqual(client.max_output_tokens, 16384)
+        self.assertFalse(client.async_tools)
+        self.assertFalse(client.use_previous_response_id)
 
     def test_rejects_unknown_client_type(self) -> None:
         with self.assertRaisesRegex(ValueError, "暂不支持"):

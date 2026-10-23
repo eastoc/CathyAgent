@@ -142,6 +142,8 @@ class LlmConfigTest(unittest.TestCase):
         self.assertIn("deepseek", providers)
         self.assertIn("openai", providers)
         self.assertIn("qwen", providers)
+        self.assertIn("astra", providers)
+        self.assertIn("astra_relay", providers)
         llm = get_llm(cfg)
         llm_section = cfg["LLM"]
         self.assertEqual(llm["temperature"], llm_section["temperature"])

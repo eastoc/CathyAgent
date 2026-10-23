@@ -1,4 +1,4 @@
-"""MuJoCo 根位姿反馈：进程内 qpos 读取器与跨进程 ZMQ 桥。"""
+"""MuJoCo 根位姿与 SONIC 29 关节状态的跨进程 ZMQ 桥。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from collections.abc import Callable, Sequence
 
 from ..contracts import Pose2D
 from .contracts import TimedPose2D
-from .wire import build_navigation_pose_message, decode_navigation_pose_message
+from .wire import build_navigation_pose_message, decode_navigation_state_message
 
 
 def yaw_from_quaternion_wxyz(quaternion: Sequence[float]) -> float:
@@ -34,7 +34,12 @@ class MujocoQposPoseProvider:
             float(qpos[1]),
             yaw_from_quaternion_wxyz(qpos[3:7]),
         )
-        return TimedPose2D(pose, time.monotonic())
+        root = tuple(float(value) for value in qpos[:7])
+        joints = (
+            tuple(float(value) for value in qpos[7:36])
+            if len(qpos) >= 36 else None
+        )
+        return TimedPose2D(pose, time.monotonic(), root, joints, None)
 
 
 class ZmqNavigationPoseProvider:
@@ -44,10 +49,12 @@ class ZmqNavigationPoseProvider:
         *,
         topic: str,
         first_sample_timeout_seconds: float = 0.5,
+        max_sample_age_seconds: float = 1.0,
     ) -> None:
         self.endpoint = endpoint
         self.topic = topic
         self.first_sample_timeout_seconds = first_sample_timeout_seconds
+        self.max_sample_age_seconds = max_sample_age_seconds
         self._context = None
         self._socket = None
         self._latest: TimedPose2D | None = None
@@ -78,15 +85,20 @@ class ZmqNavigationPoseProvider:
                 try:
                     while True:
                         message = self._socket.recv(zmq.NOBLOCK)
-                        x, y, yaw = decode_navigation_pose_message(
+                        (x, y, yaw), root, joints, motion_active = decode_navigation_state_message(
                             message, topic=self.topic
                         )
                         self._latest = TimedPose2D(
-                            Pose2D(x, y, yaw), time.monotonic()
+                            Pose2D(x, y, yaw), time.monotonic(), root, joints,
+                            motion_active,
                         )
                 except zmq.Again:
                     pass
-                if self._latest is not None:
+                if (
+                    self._latest is not None
+                    and time.monotonic() - self._latest.monotonic_time
+                    <= self.max_sample_age_seconds
+                ):
                     return self._latest
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -97,7 +109,11 @@ class ZmqNavigationPoseProvider:
                 raise RuntimeError(
                     f"在 {self.first_sample_timeout_seconds:.1f}s 内未收到 MuJoCo 根位姿"
                 )
-            return self._latest
+            age = time.monotonic() - self._latest.monotonic_time
+            raise RuntimeError(
+                f"MuJoCo 根位姿反馈已过期: age={age:.3f}s，"
+                f"最大允许 {self.max_sample_age_seconds:.3f}s"
+            )
 
     def close(self) -> None:
         with self._lock:
@@ -131,15 +147,19 @@ class ZmqNavigationPosePublisher:
         self._socket.setsockopt(zmq.SNDHWM, 1)
         self._socket.bind(self.endpoint)
 
-    def publish_qpos(self, qpos: Sequence[float]) -> None:
+    def publish_qpos(
+        self, qpos: Sequence[float], *, motion_active: bool = False
+    ) -> None:
         self.open()
-        if len(qpos) < 7:
-            raise ValueError("G1 qpos 至少需要 7 个根自由度")
+        if len(qpos) < 36:
+            raise ValueError("G1 qpos 至少需要 7 个根自由度和 29 个硬件顺序关节角")
         yaw = yaw_from_quaternion_wxyz(qpos[3:7])
         assert self._socket is not None
         self._socket.send(
             build_navigation_pose_message(
-                topic=self.topic, x=float(qpos[0]), y=float(qpos[1]), yaw=yaw
+                topic=self.topic, x=float(qpos[0]), y=float(qpos[1]), yaw=yaw,
+                root_qpos=qpos[:7], joint_position_hardware=qpos[7:36],
+                motion_active=motion_active,
             )
         )
 

@@ -1,1 +1,1 @@
-"""G1 双夹爪、固定下半身的 GR00T manipulation 接口。"""
+"""G1 Dex3、SONIC 导航交接与 NVIDIA GN1x manipulation 接口。"""

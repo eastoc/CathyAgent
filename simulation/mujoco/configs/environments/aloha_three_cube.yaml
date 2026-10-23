@@ -1,7 +1,6 @@
 schema_version: 1
 environment_id: aloha_three_cube
 backend: native_aloha
-control_mode: vla_mcp
 
 scene:
   seed: 7

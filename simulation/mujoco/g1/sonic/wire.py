@@ -68,26 +68,74 @@ def decode_header(message: bytes, topic: bytes) -> dict[str, object]:
 
 
 def build_navigation_pose_message(
-    *, topic: str, x: float, y: float, yaw: float
+    *, topic: str, x: float, y: float, yaw: float,
+    root_qpos: Sequence[float] | None = None,
+    joint_position_hardware: Sequence[float] | None = None,
+    motion_active: bool | None = None,
 ) -> bytes:
     if not all(math.isfinite(value) for value in (x, y, yaw)):
         raise ValueError("导航位姿必须是有限数")
     fields = [{"name": "pose_xy_yaw", "dtype": "f64", "shape": [3]}]
-    return topic.encode("utf-8") + _header(fields) + struct.pack("<ddd", x, y, yaw)
+    payload = struct.pack("<ddd", x, y, yaw)
+    if root_qpos is not None or joint_position_hardware is not None:
+        if root_qpos is None or len(root_qpos) != 7:
+            raise ValueError("SONIC root_qpos 必须包含 7 个分量")
+        if joint_position_hardware is None or len(joint_position_hardware) != 29:
+            raise ValueError("SONIC joint_position_hardware 必须包含 29 个关节角")
+        values = [*root_qpos, *joint_position_hardware]
+        if not all(math.isfinite(float(value)) for value in values):
+            raise ValueError("SONIC 根位姿和关节角必须是有限数")
+        fields.extend([
+            {"name": "root_qpos", "dtype": "f64", "shape": [7]},
+            {"name": "joint_position_hardware", "dtype": "f32", "shape": [29]},
+            {"name": "motion_active", "dtype": "u8", "shape": [1]},
+        ])
+        payload += struct.pack("<7d", *(float(value) for value in root_qpos))
+        payload += struct.pack(
+            "<29f", *(float(value) for value in joint_position_hardware)
+        )
+        payload += struct.pack("B", int(bool(motion_active)))
+    return topic.encode("utf-8") + _header(fields) + payload
 
 
-def decode_navigation_pose_message(message: bytes, *, topic: str) -> tuple[float, float, float]:
+def decode_navigation_state_message(
+    message: bytes, *, topic: str
+) -> tuple[
+    tuple[float, float, float],
+    tuple[float, ...] | None,
+    tuple[float, ...] | None,
+    bool | None,
+]:
     prefix = topic.encode("utf-8")
     header = decode_header(message, prefix)
     fields = header.get("fields")
-    if not isinstance(fields, list) or fields != [
-        {"name": "pose_xy_yaw", "dtype": "f64", "shape": [3]}
-    ]:
-        raise ValueError("导航位姿字段必须是 pose_xy_yaw:f64[3]")
+    pose_field = {"name": "pose_xy_yaw", "dtype": "f64", "shape": [3]}
+    full_fields = [
+        pose_field,
+        {"name": "root_qpos", "dtype": "f64", "shape": [7]},
+        {"name": "joint_position_hardware", "dtype": "f32", "shape": [29]},
+        {"name": "motion_active", "dtype": "u8", "shape": [1]},
+    ]
     offset = len(prefix) + HEADER_SIZE
-    if len(message) != offset + 24:
-        raise ValueError("导航位姿消息长度无效")
-    return struct.unpack("<ddd", message[offset:])
+    if fields == [pose_field]:
+        if len(message) != offset + 24:
+            raise ValueError("导航位姿消息长度无效")
+        return struct.unpack("<ddd", message[offset:]), None, None, None
+    if fields != full_fields:
+        raise ValueError("SONIC 状态字段定义无效")
+    expected = offset + 24 + 56 + 116 + 1
+    if len(message) != expected:
+        raise ValueError("SONIC 完整状态消息长度无效")
+    pose = struct.unpack("<ddd", message[offset:offset + 24])
+    root = struct.unpack("<7d", message[offset + 24:offset + 80])
+    joints = struct.unpack("<29f", message[offset + 80:offset + 196])
+    motion_active = bool(struct.unpack("B", message[offset + 196:])[0])
+    return pose, root, joints, motion_active
+
+
+def decode_navigation_pose_message(message: bytes, *, topic: str) -> tuple[float, float, float]:
+    pose, _, _, _ = decode_navigation_state_message(message, topic=topic)
+    return pose
 
 
 __all__ = [
@@ -96,5 +144,6 @@ __all__ = [
     "build_planner_message",
     "build_navigation_pose_message",
     "decode_navigation_pose_message",
+    "decode_navigation_state_message",
     "decode_header",
 ]

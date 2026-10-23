@@ -95,6 +95,7 @@ class NavigationExecutor:
                             last_pose, start_time, commands_sent,
                         )
 
+
                 command = follower.command(last_pose)
                 facing = command.facing
                 if command.phase == "arrived":

@@ -10,9 +10,9 @@ navigation:
 robot:
   profile_version: g1-sonic-slow-walk-v1
   # 圆形保守包络：身体/摆臂扫掠范围与安全余量合计。
-  inflation_radius_m: 0.45
+  inflation_radius_m: 0.25
   clearance_cost_margin_m: 0.20
-  # 仅供执行跟踪横摆使用；目标点和 A* 仍采用完整 0.45m 膨胀半径。
+  # 仅供执行跟踪横摆使用；目标点和 D* Lite 仍采用完整 0.25m 膨胀半径。
   execution_clearance_tolerance_m: 0.10
 
 rendering:

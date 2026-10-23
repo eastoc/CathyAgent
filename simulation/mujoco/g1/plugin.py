@@ -26,6 +26,8 @@ class G1NavigationToolPlugin(ToolPlugin):
         self.service: G1NavigationService | None = None
         self.artifact_store: LocalArtifactStore | None = None
         self._pose_resource = None
+        self._timed_state_provider = None
+        self._navigation_lock = threading.Lock()
 
     def initialize(self, config: dict[str, Any]) -> None:
         environment = config.get("environment") or DEFAULT_G1_ENVIRONMENT
@@ -61,6 +63,7 @@ class G1NavigationToolPlugin(ToolPlugin):
                     return value
                 return TimedPose2D(value, time.monotonic())
 
+            self._timed_state_provider = read_timed_pose
             pose_provider = lambda: read_timed_pose().pose
             if executor is None and navigation_config.execution_enabled:
                 transport = config.get("sonic_transport") or ZmqSonicTransport(
@@ -79,6 +82,13 @@ class G1NavigationToolPlugin(ToolPlugin):
         )
         if executor is not None:
             executor.pose_validator = self.service.validate_execution_pose
+
+    def current_state(self) -> TimedPose2D:
+        """返回导航根位姿和可选的 SONIC 29 关节实际状态。"""
+        if self._timed_state_provider is not None:
+            return self._timed_state_provider()
+        service = self._require_service()
+        return TimedPose2D(service.current_pose(), time.monotonic())
 
     def _require_service(self) -> G1NavigationService:
         if self.service is None:
@@ -147,6 +157,27 @@ class G1NavigationToolPlugin(ToolPlugin):
         *,
         cancel: threading.Event | None,
     ) -> ToolResult:
+        if not self._navigation_lock.acquire(blocking=False):
+            return self._failure(
+                "navigate",
+                {
+                    "status": "failed",
+                    "error_code": "NAVIGATION_BUSY",
+                    "message": "已有 navigate 正在执行；请等待该后台任务完成",
+                    "motion_started": False,
+                },
+            )
+        try:
+            return self._navigate_locked(params, cancel=cancel)
+        finally:
+            self._navigation_lock.release()
+
+    def _navigate_locked(
+        self,
+        params: dict[str, Any],
+        *,
+        cancel: threading.Event | None,
+    ) -> ToolResult:
         service = self._require_service()
         xy = params["goal_xy_m"]
         goal = NavigationGoal(float(xy[0]), float(xy[1]), float(params["goal_yaw_rad"]))
@@ -165,7 +196,7 @@ class G1NavigationToolPlugin(ToolPlugin):
             payload = {
                 "status": "failed",
                 "error_code": "EXECUTION_DISABLED",
-                "message": "目标可达且 A* 已生成路径，但 SONIC 执行后端尚未启用",
+                "message": "目标可达且 D* Lite 已生成路径，但 SONIC 执行后端尚未启用",
                 "motion_started": False,
                 "requested_goal": {"xy_m": list(goal.xy), "yaw_rad": goal.yaw},
                 "plan": prepared.plan.to_dict(),

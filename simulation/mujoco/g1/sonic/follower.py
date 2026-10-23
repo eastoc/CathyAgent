@@ -1,4 +1,4 @@
-"""把 A* 折线路径转换为 SONIC 世界系移动与朝向命令。"""
+"""把 D* Lite 折线路径转换为 SONIC 世界系移动与朝向命令。"""
 
 from __future__ import annotations
 

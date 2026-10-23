@@ -16,7 +16,7 @@ tools:
     max_concurrency: 1
 
   - name: navigate
-    description: 导航到 world 坐标系中的二维地面点并以指定 yaw 停稳。执行前强制检查实体占据、膨胀半径、连通性和 A* 路径；不可达时不会启动运动。
+    description: 导航到 world 坐标系中的二维地面点并以指定 yaw 停稳。执行前强制检查实体占据、膨胀半径、连通性和 D* Lite 路径；不可达时不会启动运动。
     input_schema:
       type: object
       properties:

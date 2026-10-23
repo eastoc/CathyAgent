@@ -1,8 +1,5 @@
 # CathyAgent MuJoCo Runtime
 
-新增 ALOHA 双臂 + π0.5 MCP 模式：`mjpython -m simulation.mujoco --control-mode vla_mcp --agent`。
-场景、独立依赖和验证状态见 [VLA 使用说明](vla/README.md)。下文描述原 Z1 直接控制模式。
-
 新增 G1 已知地图导航模式：`python -m simulation.mujoco --control-mode g1_navigation --agent`，架构、SONIC 接线和测试见 [G1 导航说明](g1/README.md)。
 
 ## 结论

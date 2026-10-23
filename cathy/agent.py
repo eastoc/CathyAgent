@@ -322,6 +322,21 @@ class Agent:
         turn_state, tool_message = await self.task_registry.abuild_model_continuation(
             task_id
         )
+        # Responses API 可以仅凭 previous_response_id 续跑；DeepSeek/Qwen 等
+        # Chat Completions 是无状态接口，必须同时在本地历史中保留 tool result。
+        # 标记持久化状态，避免 continuation 重试时重复插入同一条工具消息。
+        if not record.metadata.get("continuation_message_persisted"):
+            assert record.result is not None
+            tool_message = await self._apersist_tool_result(
+                session,
+                call_id=record.provider_call_id or record.invocation.call_id,
+                name=record.invocation.name,
+                result=record.result.content,
+            )
+            record = await self.task_registry.aupdate_metadata(
+                task_id,
+                continuation_message_persisted=True,
+            )
         pending_group_id = str(
             record.metadata.get("pending_group_id") or record.run_id
         )

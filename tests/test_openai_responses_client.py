@@ -245,6 +245,7 @@ class OpenAIResponsesClientTest(unittest.TestCase):
         client = OpenAIResponsesClient(
             api_key="test-key",
             base_url="https://api.openai.com/v1",
+            async_tools=True,
         )
 
         response = client.generate(
@@ -273,6 +274,39 @@ class OpenAIResponsesClientTest(unittest.TestCase):
         self.assertEqual(tool["name"], "move_arm")
         self.assertTrue(tool["async"])
         self.assertNotIn("function", tool)
+
+    @patch("cathy.model_clients.openai_responses.OpenAI")
+    def test_omits_async_tool_hint_when_disabled(
+        self,
+        openai_cls: MagicMock,
+    ) -> None:
+        openai_cls.return_value.responses.create.return_value = SimpleNamespace(
+            id="resp_tool",
+            output_text="",
+            output=[],
+        )
+        client = OpenAIResponsesClient(
+            api_key="test-key",
+            base_url="https://api.openai.com/v1",
+            async_tools=False,
+        )
+
+        client.generate(
+            ModelRequest(
+                messages=[{"role": "user", "content": "导航"}],
+                tools=[
+                    ModelTool(
+                        name="navigate",
+                        description="导航到目标点",
+                        input_schema={"type": "object", "properties": {}},
+                        async_hint=True,
+                    )
+                ],
+            )
+        )
+
+        tool = openai_cls.return_value.responses.create.call_args.kwargs["tools"][0]
+        self.assertNotIn("async", tool)
 
     @patch("cathy.model_clients.openai_responses.OpenAI")
     def test_continues_with_function_output(self, openai_cls: MagicMock) -> None:
@@ -354,6 +388,57 @@ class OpenAIResponsesClientTest(unittest.TestCase):
         self.assertEqual(items[0]["content"][0]["type"], "input_text")
         self.assertEqual(items[0]["content"][1]["type"], "input_image")
         self.assertEqual(items[0]["content"][1]["detail"], "high")
+
+    @patch("cathy.model_clients.openai_responses.OpenAI")
+    def test_continues_with_full_history_when_previous_response_id_disabled(
+        self,
+        openai_cls: MagicMock,
+    ) -> None:
+        openai_cls.return_value.responses.create.return_value = SimpleNamespace(
+            id="resp_2",
+            output_text="动作完成",
+            output=[],
+        )
+        client = OpenAIResponsesClient(
+            api_key="relay-key",
+            base_url="https://relay.example/v1",
+            use_previous_response_id=False,
+        )
+        messages = [
+            {"role": "user", "content": "调用工具"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "name": "echo",
+                        "arguments": {},
+                        "raw_arguments": "{}",
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": {"ok": True},
+            },
+        ]
+
+        client.generate(
+            ModelRequest(
+                messages=messages,
+                turn_state=ModelTurnState("resp_1"),
+                delta_messages=[messages[-1]],
+            )
+        )
+
+        kwargs = openai_cls.return_value.responses.create.call_args.kwargs
+        self.assertNotIn("previous_response_id", kwargs)
+        self.assertEqual(
+            kwargs["input"],
+            convert_response_input(messages),
+        )
 
     def test_converts_assistant_history_to_output_text(self) -> None:
         items = convert_response_input(

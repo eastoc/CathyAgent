@@ -1,0 +1,60 @@
+{
+  "id": "cathy-g1-dex1-unifolm-wla-v2",
+  "control_hz": 30,
+  "cameras": {
+    "head": {
+      "name": "ego_view",
+      "parent": "torso_link",
+      "width": 448,
+      "height": 336,
+      "pos_m": [0.0576235, 0.01753, 0.42987],
+      "xyaxes": [0.0, -1.0, 0.0, 0.7384553406, 0.0, 0.6743023876],
+      "focalpixel": [197.65851, 197.92647],
+      "principalpixel": [218.0675, 179.6394]
+    },
+    "left_wrist": {
+      "name": "left_wrist_camera",
+      "parent": "left_gripper",
+      "width": 448,
+      "height": 336,
+      "pos_m": [0.02541028, 0.045, 0.135],
+      "xyaxes": [0.0, 0.76604346, 0.64278878, 0.0, 0.64278878, -0.76604346],
+      "focalpixel": [305.48406, 305.14505],
+      "principalpixel": [226.74519, 170.05324]
+    },
+    "right_wrist": {
+      "name": "right_wrist_camera",
+      "parent": "right_gripper",
+      "width": 448,
+      "height": 336,
+      "pos_m": [-0.02541028, 0.045, 0.135],
+      "xyaxes": [0.0, 0.76604346, 0.64278878, 0.0, 0.64278878, -0.76604346],
+      "focalpixel": [304.58057, 304.14965],
+      "principalpixel": [223.31742, 168.69531]
+    }
+  },
+  "eef": {
+    "reference_body": "pelvis",
+    "source": "gripper_base",
+    "rotation_6d": "first_two_columns"
+  },
+  "gripper": {
+    "open_width_m": 0.04,
+    "closed_width_m": 0.0,
+    "model_open_value": 4.5,
+    "model_closed_value": 0.0,
+    "encoding": "dex1_raw_gripper_position"
+  },
+  "lower_body": {
+    "left_leg_joint_rad": [-0.312, 0.0, 0.0, 0.669, -0.363, 0.0],
+    "right_leg_joint_rad": [-0.312, 0.0, 0.0, 0.669, -0.363, 0.0],
+    "source": "sonic_default_standing_pose"
+  },
+  "execution": {
+    "ik_iterations": 48,
+    "ik_damping": 0.03,
+    "ik_position_tolerance_m": 0.004,
+    "ik_rotation_tolerance_rad": 0.04,
+    "max_joint_step_rad": 0.08
+  }
+}

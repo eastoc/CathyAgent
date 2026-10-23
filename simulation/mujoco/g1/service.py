@@ -11,7 +11,7 @@ from .config import G1NavigationConfig
 from .contracts import MapObservation, NavigationGoal, Pose2D, PreparedNavigation
 from .navigation.map import StaticMapBuilder, cell_to_world, world_to_cell
 from .navigation.map_view import MapViewService
-from .navigation.planner import AStarPlanner
+from .navigation.planner import DStarLitePlanner
 from .navigation.reachability import ReachabilityChecker
 from .sonic.contracts import NavigationExecution
 from .sonic.executor import NavigationExecutor
@@ -31,7 +31,7 @@ class G1NavigationService:
         self._pose_provider = pose_provider or (lambda: Pose2D(*initial))
         self.executor = executor
         self._checker = ReachabilityChecker()
-        self._planner = AStarPlanner(config.clearance_cost_margin_m)
+        self._planner = DStarLitePlanner(config.clearance_cost_margin_m)
         self._view = MapViewService(self.context, scale=config.render_scale)
         self._last_plan = None
 
@@ -53,7 +53,7 @@ class G1NavigationService:
                 type(reachability)(
                     False,
                     "NO_PATH",
-                    "目标通过点可达性检查，但 A* 未生成有效路径",
+                    "目标通过点可达性检查，但 D* Lite 未生成有效路径",
                     reachability.start_cell,
                     reachability.goal_cell,
                 ),

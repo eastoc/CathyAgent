@@ -13,6 +13,7 @@ from simulation.mujoco.config import MODULE_ROOT, resolve_resource
 
 
 DEFAULT_G1_ENVIRONMENT = "configs/environments/g1_open_kitchen.yaml"
+DEFAULT_G1_SONIC_ENVIRONMENT = "configs/environments/g1_open_kitchen_sonic.yaml"
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,7 @@ def load_navigation_metadata(config: G1NavigationConfig) -> dict[str, Any]:
 
 __all__ = [
     "DEFAULT_G1_ENVIRONMENT",
+    "DEFAULT_G1_SONIC_ENVIRONMENT",
     "G1NavigationConfig",
     "SonicConfig",
     "load_g1_navigation_config",

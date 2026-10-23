@@ -422,6 +422,49 @@ class AgentModelClientTest(unittest.TestCase):
 
 
 class AgentPendingToolTest(unittest.IsolatedAsyncioTestCase):
+    async def test_background_policy_does_not_require_provider_async_flag(
+        self,
+    ) -> None:
+        plugin = _ConcurrentPlugin()
+        model = _ScriptedModelClient(
+            [
+                ModelResponse(
+                    tool_calls=(
+                        ModelToolCall(
+                            id="call_regular_1",
+                            name="analyze",
+                            arguments={"value": "sample"},
+                            async_execution=False,
+                        ),
+                    ),
+                    next_turn_state=ModelTurnState("resp_regular_1"),
+                ),
+                ModelResponse(text="后台分析完成"),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            store = SessionStore(Path(td) / "session.db")
+            session = store.create()
+            agent = Agent(
+                llm=model,
+                tools=_background_registry(plugin),
+                assembler=ContextAssembler(token_budget=4096),
+                store=store,
+            )
+
+            pending = await agent.arun(session, "后台分析")
+            self.assertEqual(pending.status, "pending")
+            self.assertEqual(len(pending.pending_task_ids), 1)
+            completed = await agent.aresume_task(
+                session,
+                pending.pending_task_ids[0],
+            )
+            store.close()
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(completed.content, "后台分析完成")
+
     async def test_background_tool_returns_pending_and_resumes_with_original_ids(
         self,
     ) -> None:
@@ -466,6 +509,12 @@ class AgentPendingToolTest(unittest.IsolatedAsyncioTestCase):
                 pending.pending_task_ids[0],
             )
             persisted = agent.task_registry.get(pending.pending_task_ids[0])
+            persisted_tool_messages = [
+                message
+                for message in session.messages
+                if message.role == "tool"
+                and message.tool_call_id == "call_async_1"
+            ]
             store.close()
 
         self.assertEqual(completed.status, "completed")
@@ -483,6 +532,8 @@ class AgentPendingToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(persisted.provider_call_id, "call_async_1")
         self.assertEqual(persisted.latest_response_id, "resp_async_1")
         self.assertTrue(persisted.metadata["continuation_delivered"])
+        self.assertTrue(persisted.metadata["continuation_message_persisted"])
+        self.assertEqual(len(persisted_tool_messages), 1)
 
     async def test_multiple_pending_tasks_advance_latest_response_id_serially(
         self,

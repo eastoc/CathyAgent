@@ -1,7 +1,7 @@
 # LLM：provider + 通用推理参数；各供应商连接信息见 config/llm/<name>.yaml
 LLM:
-  provider: astra
-  temperature: 0.7
+  provider: astra_relay # astra=OpenAI 官方；astra_relay=第三方中转
+  temperature: 1.0
   max_tokens: 128000
   timeout_sec: 120
   max_retries: 3
@@ -95,7 +95,7 @@ HOOKS:
 
 SANDBOX:
   enabled: true
-  # mac 优先：seatbelt（py-sandboxrt）；若本机未装 py-sandboxrt 可先切 local_restricted
+  # macOS 使用系统自带的 /usr/bin/sandbox-exec；local_restricted 无系统级隔离
   backend: seatbelt                 # seatbelt | local_restricted
   workspace_root: /Users/east_wu/EastProject/CAD
   default_timeout_sec: 10

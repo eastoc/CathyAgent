@@ -47,6 +47,8 @@ class OpenAIResponsesClient:
         retry_backoff_max_sec: float = 20.0,
         store: bool = True,
         parallel_tool_calls: bool = True,
+        async_tools: bool = False,
+        use_previous_response_id: bool = True,
     ) -> None:
         if not api_key:
             raise ValueError("LLM api_key 未配置")
@@ -75,6 +77,8 @@ class OpenAIResponsesClient:
         self.retry_backoff_max_sec = max(0.0, float(retry_backoff_max_sec))
         self.store = bool(store)
         self.parallel_tool_calls = bool(parallel_tool_calls)
+        self.async_tools = bool(async_tools)
+        self.use_previous_response_id = bool(use_previous_response_id)
 
     def generate(self, request: ModelRequest) -> ModelResponse:
         """执行一次 Responses 请求并返回供应商无关的模型输出。"""
@@ -278,7 +282,11 @@ class OpenAIResponsesClient:
 
     def _build_request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         input_messages = request.messages
-        if request.turn_state and request.delta_messages is not None:
+        if (
+            self.use_previous_response_id
+            and request.turn_state
+            and request.delta_messages is not None
+        ):
             input_messages = request.delta_messages
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -292,10 +300,13 @@ class OpenAIResponsesClient:
         }
         if self.max_output_tokens is not None:
             kwargs["max_output_tokens"] = self.max_output_tokens
-        if request.turn_state:
+        if self.use_previous_response_id and request.turn_state:
             kwargs["previous_response_id"] = str(request.turn_state.value)
         if request.tools:
-            kwargs["tools"] = [convert_response_tool(tool) for tool in request.tools]
+            kwargs["tools"] = [
+                convert_response_tool(tool, include_async=self.async_tools)
+                for tool in request.tools
+            ]
             kwargs["tool_choice"] = convert_tool_choice(request.tool_choice)
         return kwargs
 
@@ -379,7 +390,11 @@ async def _close_async_stream(stream: Any) -> None:
         await result
 
 
-def convert_response_tool(tool: ModelTool) -> dict[str, Any]:
+def convert_response_tool(
+    tool: ModelTool,
+    *,
+    include_async: bool = True,
+) -> dict[str, Any]:
     """把内部工具定义转换为 Responses function schema。"""
     if not tool.name:
         raise ValueError("工具 schema 缺少 name")
@@ -393,7 +408,7 @@ def convert_response_tool(tool: ModelTool) -> dict[str, Any]:
         converted["description"] = tool.description
     if tool.strict is not None:
         converted["strict"] = tool.strict
-    if tool.async_hint:
+    if include_async and tool.async_hint:
         converted["async"] = True
     return converted
 

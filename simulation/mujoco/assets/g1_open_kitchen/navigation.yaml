@@ -39,7 +39,16 @@ targets:
     site: goal_island_south
     position_xy_m: [3.35, -1.10]
     facing_xy_m: [3.35, 0.0]
+# 导航成功后才允许切换到固定站立的上半身 manipulation 场景。
+manipulation_stations:
+  - name: island_south
+    goal_site: goal_island_south
+    position_xy_m: [3.35, -1.10]
+    yaw_rad: 1.5707963267948966
+    position_tolerance_m: 0.12
+    yaw_tolerance_rad: 0.15
 static_obstacles:
+  # online_chair_* 故意不在静态层中；它们用于在线感知与 D* Lite 重规划回归。
   - north_wall
   - south_wall
   - west_wall

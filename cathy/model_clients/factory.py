@@ -55,6 +55,10 @@ def build_model_client(config: Mapping[str, Any]) -> ModelClient:
             retry_backoff_max_sec=float(config.get("retry_backoff_max_sec") or 20),
             store=bool(config.get("store", True)),
             parallel_tool_calls=bool(config.get("parallel_tool_calls", True)),
+            async_tools=bool(config.get("async_tools", False)),
+            use_previous_response_id=bool(
+                config.get("use_previous_response_id", True)
+            ),
         )
 
     return OpenAICompatibleChatClient(

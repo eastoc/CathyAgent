@@ -1,0 +1,162 @@
+name: g1_manipulation
+version: 0.3.0
+description: Unitree G1 Dex3 与 NVIDIA GN1x Arena 静态苹果抓放闭环 manipulation。
+
+tools:
+  - name: g1_describe
+    description: 查询Arena G1 Dex3、单路头部相机和AutoDL GN1x服务元数据及兼容性。开始操作前必须调用。
+    input_schema:
+      type: object
+      properties: {}
+      required: []
+      additionalProperties: false
+    side_effect: none
+    timeout_seconds: 30
+    concurrency_key: g1_manipulation
+    max_concurrency: 1
+
+  - name: g1_observe
+    description: 获取G1当前双臂、Dex3双手、持物记录以及头部/总览图像；不暴露物体真值。
+    input_schema:
+      type: object
+      properties: {}
+      required: []
+      additionalProperties: false
+    side_effect: none
+    timeout_seconds: 30
+    concurrency_key: g1_manipulation
+    max_concurrency: 1
+
+  - name: g1_pick
+    description: 使用NVIDIA GN1x闭环抓取苹果；内部短动作块重规划，仅在Dex3拇指与食指/中指形成对向接触且抬升稳定后成功。
+    input_schema:
+      type: object
+      properties:
+        task_id:
+          type: string
+          enum: [apple_to_plate]
+        hand:
+          type: string
+          enum: [auto, left, right]
+          default: auto
+        max_policy_calls:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+        execute_steps:
+          type: integer
+          minimum: 1
+          maximum: 8
+          default: 5
+        request_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+      required: [task_id]
+      additionalProperties: false
+    side_effect: reversible
+    cancellable: true
+    timeout_seconds: 900
+    concurrency_key: g1_manipulation
+    max_concurrency: 1
+
+  - name: g1_place
+    description: 使用与pick相同的标准任务指令闭环放置；检测到释放后停止VLA推理，等待物体在目标内落稳并验证。
+    input_schema:
+      type: object
+      properties:
+        task_id:
+          type: string
+          enum: [apple_to_plate]
+        hand:
+          type: string
+          enum: [left, right]
+        max_policy_calls:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+        execute_steps:
+          type: integer
+          minimum: 1
+          maximum: 8
+          default: 5
+        settle_timeout_seconds:
+          type: number
+          minimum: 0.5
+          maximum: 5
+          default: 2
+        request_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+      required: [task_id]
+      additionalProperties: false
+    side_effect: reversible
+    cancellable: true
+    timeout_seconds: 900
+    concurrency_key: g1_manipulation
+    max_concurrency: 1
+
+  - name: g1_release
+    description: 本地将指定Dex3手张开，不调用GN1x，也不宣称物体已经正确放置。仅用于用户明确要求放手或失败恢复。
+    input_schema:
+      type: object
+      properties:
+        hand:
+          type: string
+          enum: [auto, left, right, both]
+          default: auto
+        request_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+      required: []
+      additionalProperties: false
+    side_effect: reversible
+    timeout_seconds: 30
+    concurrency_key: g1_manipulation
+    max_concurrency: 1
+
+  - name: g1_stow
+    description: 无持物时把双臂和腰部收回安全休息姿态，不调用GN1x。
+    input_schema:
+      type: object
+      properties:
+        request_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+      required: []
+      additionalProperties: false
+    side_effect: reversible
+    timeout_seconds: 30
+    concurrency_key: g1_manipulation
+    max_concurrency: 1
+
+  - name: g1_stop
+    description: 请求立即停止当前G1 manipulation技能；迟到的GN1x动作不会执行。
+    input_schema:
+      type: object
+      properties:
+        request_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+      required: []
+      additionalProperties: false
+    side_effect: reversible
+    timeout_seconds: 10
+    concurrency_key: g1_emergency_stop
+    max_concurrency: 1
+
+permissions:
+  network: ["u405425-xd7z-334db773.weste.seetacloud.com"]
+execution:
+  runtime: python
+  entrypoint: manipulation.plugin:G1ManipulationToolPlugin
+  timeout_seconds: 900
+  sandbox: false
+metadata:
+  trust_level: builtin

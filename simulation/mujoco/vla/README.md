@@ -7,21 +7,11 @@
 链路：CathyAgent → 本地技能 MCP → ALOHA 执行器 → AutoDL 纯推理 MCP → OpenPI π0.5。
 LLM 只规划语言子任务与看图验证，不输出低层动作。
 
-## 本地启动
+## 使用范围
 
-已有 `agent` 环境可直接使用，不必重新安装 requirements。新环境才需要安装本目录的
-`requirements.txt` 和项目基础依赖。
-
-```bash
-# 不连模型，先检查机器人场景；macOS GUI 仍需 mjpython。
-mjpython -m simulation.mujoco --control-mode vla_mcp --describe
-
-# AutoDL 新服务部署后，启动 Agent。
-mjpython -m simulation.mujoco --control-mode vla_mcp --agent
-```
-
-默认配置为 `configs/environments/aloha_three_cube.yaml`。
-原命令 `mjpython -m simulation.mujoco --agent` 仍是原 Z1 直接控制模式。
+该目录保留 ALOHA 与 π0.5 的底层运行时、策略适配与测试，不再作为
+`simulation.mujoco` 的 `control_mode` 启动入口。面向 Agent 的移动与操作联调使用
+`g1_vla`，由其注册的工具集合决定可用能力。
 无桌面 Linux 使用 `MUJOCO_GL=egl` 并加 `--no-viewer`；macOS 离屏相机用 CGL，
 不会在工作线程创建 GLFW 隐藏窗口。
 

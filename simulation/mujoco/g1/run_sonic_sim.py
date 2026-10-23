@@ -1,4 +1,4 @@
-"""在单一进程中启动 MuJoCo、SONIC ONNX 推理和根位姿发布。"""
+"""在单一进程中启动 MuJoCo、SONIC ONNX 推理和全身状态发布。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import shutil
 import sys
 import time
 
-from .config import DEFAULT_G1_ENVIRONMENT, load_g1_navigation_config
+from .config import DEFAULT_G1_SONIC_ENVIRONMENT, load_g1_navigation_config
 from .direct_sim import DirectG1MujocoEnv
 from .sonic.pose import ZmqNavigationPosePublisher
 from .sonic_onnx import (
@@ -67,7 +67,7 @@ def _configure_sonic_imports(root: Path) -> None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="G1 MuJoCo + SONIC ONNX 同进程仿真")
-    parser.add_argument("--environment", default=DEFAULT_G1_ENVIRONMENT)
+    parser.add_argument("--environment", default=DEFAULT_G1_SONIC_ENVIRONMENT)
     parser.add_argument("--sim-frequency", type=int, default=200)
     parser.add_argument("--control-frequency", type=int, default=50)
     parser.add_argument("--planner-frequency", type=int, default=10)
@@ -80,7 +80,20 @@ def _parse_args() -> argparse.Namespace:
         default=Path(os.environ.get("SONIC_ROOT", DEFAULT_SONIC_ROOT)),
         help="GR00T-WholeBodyControl 仓库目录（也可设置 SONIC_ROOT）",
     )
-    parser.add_argument("--no-viewer", action="store_true")
+    viewer = parser.add_mutually_exclusive_group()
+    viewer.add_argument(
+        "--viewer",
+        dest="no_viewer",
+        action="store_false",
+        help="打开独立导航 Viewer（仅用于调试；g1_vla 联调默认只显示 Dex3 操作 Viewer）",
+    )
+    viewer.add_argument(
+        "--no-viewer",
+        dest="no_viewer",
+        action="store_true",
+        help="无窗口运行 SONIC 导航仿真（默认）",
+    )
+    parser.set_defaults(no_viewer=True)
     parser.add_argument(
         "--disable-zmq", action="store_true",
         help="仅运行 MuJoCo+ONNX 自检，不接收导航命令或发布位姿",
@@ -104,7 +117,8 @@ def main() -> None:
     if args.control_frequency > args.sim_frequency:
         raise ValueError("control-frequency 不能高于 sim-frequency")
     navigation = load_g1_navigation_config(args.environment)
-    network_disabled = args.disable_zmq or args.self_test_walk
+    command_receiver_disabled = args.disable_zmq or args.self_test_walk
+    publisher_disabled = args.disable_zmq
     sim_dt = 1.0 / args.sim_frequency
     env = DirectG1MujocoEnv(
         navigation.scene_path,
@@ -118,7 +132,7 @@ def main() -> None:
         SonicOnnxPaths.from_root(args.sonic_root.expanduser().resolve()),
         bridge,
         provider=args.provider,
-        command_endpoint=None if network_disabled else args.command_endpoint,
+        command_endpoint=None if command_receiver_disabled else args.command_endpoint,
         control_hz=args.control_frequency,
         planner_hz=args.planner_frequency,
         forced_command=(
@@ -130,12 +144,14 @@ def main() -> None:
         ),
     )
     publisher = None
-    if not network_disabled:
+    if not publisher_disabled:
         publisher = ZmqNavigationPosePublisher(
             args.pose_endpoint, topic=navigation.sonic.pose_topic
         )
         publisher.open()
-        publisher.publish_qpos(env.mj_data.qpos)
+        publisher.publish_qpos(
+            env.mj_data.qpos, motion_active=controller.motion_active
+        )
     controller.open(env)
     control_stride = max(1, round(args.sim_frequency / args.control_frequency))
     viewer_stride = max(1, round(0.02 / sim_dt))
@@ -153,7 +169,9 @@ def main() -> None:
                 env.elastic_band_enabled = not controller.active
             env.sim_step()
             if publisher is not None:
-                publisher.publish_qpos(env.mj_data.qpos)
+                publisher.publish_qpos(
+                    env.mj_data.qpos, motion_active=controller.motion_active
+                )
             if counter % viewer_stride == 0:
                 env.update_viewer()
             if counter % reward_stride == 0:

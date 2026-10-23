@@ -1,169 +1,262 @@
-"""无 GPU 回归：通信契约、动作隔离和 MuJoCo 夹爪物理。"""
+"""GN1x Arena G1 契约、场景与可选 MuJoCo 回归。"""
+
 from __future__ import annotations
 
-import copy
 import importlib.util
-import tempfile
-from pathlib import Path
+import threading
+from types import SimpleNamespace
+import time
 import unittest
+import xml.etree.ElementTree as ET
 
 import numpy as np
 
-from .contract import VERSION, SIM_DIMS, encode_image, observation_from_request, sim_metadata, upper_actions
-
-
-def request_fixture():
-    return {
-        "schema_version": VERSION, "prompt": "pick the red cube",
-        "state": {k: [[0.2] * d] for k, d in SIM_DIMS.items()},
-        "video": {"ego_view": [encode_image(np.full((16, 24, 3), i, dtype=np.uint8)) for i in (10, 20)]},
-    }
+from .config import DEFAULT_GROOT_URL, G1ManipulationConfig
+from .contract import (
+    ACTION_DIMS, ACTION_DELTA_INDICES, EMBODIMENT, HAND_SUFFIXES, JOINT_GROUPS,
+    MODEL_ID, SCENE, SONIC_JOINTS, STATE_DIMS, VERSION, calibration_hash, encode_image,
+    load_calibration, observation_from_request, sim_metadata, validate_actions,
+    validate_metadata,
+)
+from .tasks import DEFAULT_TASK, TASKS, load_station, validate_handoff
+from .service import G1ManipulationTools
 
 
 class ContractTests(unittest.TestCase):
-    def test_rgb_time_and_batch_dimensions(self):
-        obs = observation_from_request(request_fixture(), sim_metadata())
-        self.assertEqual(obs["video"]["ego_view"].shape, (1, 2, 16, 24, 3))
-        np.testing.assert_array_equal(obs["video"]["ego_view"][0, :, 0, 0, 0], [10, 20])
-        self.assertEqual(obs["state"]["left_arm"].shape, (1, 1, 7))
+    def test_groot_service_modality_shape(self):
+        metadata = validate_metadata(sim_metadata())
+        self.assertEqual(metadata["embodiment"], EMBODIMENT)
+        self.assertEqual(metadata["video_keys"], ["ego_view"])
+        self.assertEqual(metadata["video_delta_indices"], [0])
+        self.assertEqual(metadata["state_dims"], {
+            "left_arm": 7, "right_arm": 7, "left_hand": 7,
+            "right_hand": 7, "waist": 3,
+        })
+        self.assertEqual(metadata["action_dims"], metadata["state_dims"])
+        self.assertEqual(len(metadata["action_delta_indices"]), 40)
 
-    def test_wrong_hand_dimension_and_nan_rejected(self):
-        for value in ([[0] * 7], [[float("nan")]]):
-            request = request_fixture()
-            request["state"]["left_hand"] = value
-            with self.assertRaises(ValueError):
-                observation_from_request(request, sim_metadata())
+    def test_running_groot_metadata_without_legacy_fields_is_accepted(self):
+        metadata = {
+            **sim_metadata(),
+            "backend": "gr00t_n1.7",
+            "model_path": "/root/autodl-tmp/vla/models/"
+            "GN1x-Tuned-Arena-G1-Static-PickNPlace",
+        }
+        self.assertEqual(validate_metadata(metadata)["backend"], "gr00t_n1.7")
 
-    def test_lower_body_is_discarded_without_readding_state(self):
+    def test_dataset_joint_order_is_43_dof_g1_dex3(self):
+        legs = tuple(
+            f"{side}_{name}_joint"
+            for side in ("left", "right")
+            for name in ("hip_pitch", "hip_roll", "hip_yaw", "knee", "ankle_pitch", "ankle_roll")
+        )
+        dataset_order = (
+            *legs[:6], *legs[6:], *JOINT_GROUPS["waist"],
+            *JOINT_GROUPS["left_arm"], *JOINT_GROUPS["left_hand"],
+            *JOINT_GROUPS["right_arm"], *JOINT_GROUPS["right_hand"],
+        )
+        self.assertEqual(len(dataset_order), 43)
+        self.assertEqual(
+            tuple(name[len("left_hand_"):-len("_joint")]
+                  for name in JOINT_GROUPS["left_hand"]),
+            HAND_SUFFIXES,
+        )
+
+    def test_observation_is_single_rgb_frame_and_five_state_groups(self):
         metadata = sim_metadata()
-        metadata["action_dims"].update(navigate_command=3, base_height_command=1)
-        actions = {k: np.full((1, 40, d), 0.7, dtype=np.float32) for k, d in metadata["action_dims"].items()}
-        result = upper_actions(actions, metadata)
-        self.assertEqual(set(result), set(SIM_DIMS))
-        self.assertAlmostEqual(result["left_arm"][0][0], 0.7)
+        image = np.full((480, 640, 3), 127, dtype=np.uint8)
+        payload = {
+            "schema_version": VERSION,
+            "prompt": "move the apple to the plate",
+            "video": {"ego_view": [encode_image(image)]},
+            "state": {
+                key: [np.zeros(dim, dtype=np.float32).tolist()]
+                for key, dim in STATE_DIMS.items()
+            },
+        }
+        observation = observation_from_request(payload, metadata)
+        self.assertEqual(observation["video"]["ego_view"].shape, (1, 1, 480, 640, 3))
+        self.assertEqual(observation["state"]["left_hand"].shape, (1, 1, 7))
 
-
-@unittest.skipUnless(importlib.util.find_spec("fastapi"), "需要 requirements-server.txt")
-class HttpTests(unittest.TestCase):
-    def setUp(self):
-        from fastapi.testclient import TestClient
-        from .server import create_app, HoldPolicy
+    def test_actions_require_all_40_step_outputs(self):
         metadata = sim_metadata()
-        metadata.update(backend="mock_hold_not_gr00t", calibration_sha256="test-calibration")
-        self.client = TestClient(create_app(HoldPolicy(), metadata, api_token="test-token"))
-        self.headers = {"Authorization": "Bearer test-token"}
+        response = {
+            "schema_version": VERSION,
+            "action_representation": "absolute_physical",
+            "actions": {
+                key: np.zeros((len(ACTION_DELTA_INDICES), dim), dtype=np.float32).tolist()
+                for key, dim in ACTION_DIMS.items()
+            },
+        }
+        result = validate_actions(response, metadata, 5)
+        self.assertEqual(result["left_hand"].shape, (5, 7))
+        del response["actions"]["right_hand"]
+        with self.assertRaisesRegex(ValueError, "right_hand"):
+            validate_actions(response, metadata, 5)
 
-    def tearDown(self):
-        self.client.close()
+    def test_config_uses_groot_http_and_accepts_legacy_url_key(self):
+        cfg = G1ManipulationConfig.from_mapping({"wla_url": DEFAULT_GROOT_URL})
+        self.assertEqual(cfg.groot_url, DEFAULT_GROOT_URL)
 
-    def test_auth_health_metadata_and_infer(self):
-        self.assertEqual(self.client.get("/health").json()["backend"], "mock_hold_not_gr00t")
-        self.assertEqual(self.client.get("/metadata").status_code, 401)
-        self.assertEqual(self.client.get("/metadata", headers=self.headers).status_code, 200)
-        request = request_fixture()
-        request["calibration_sha256"] = "test-calibration"
-        reply = self.client.post("/infer", json=request, headers=self.headers)
-        self.assertEqual(reply.status_code, 200, reply.text)
-        self.assertEqual(np.asarray(reply.json()["actions"]["left_arm"]).shape, (40, 7))
-        self.assertNotIn("navigate_command", reply.json()["actions"])
+    def test_only_checkpoint_supported_task_is_exposed(self):
+        self.assertEqual(DEFAULT_TASK, "apple_to_plate")
+        self.assertEqual(set(TASKS), {"apple_to_plate"})
+        self.assertEqual(TASKS[DEFAULT_TASK].instruction, "move the apple to the plate")
 
-    def test_malformed_request_and_calibration_rejected(self):
-        request = request_fixture()
-        self.assertEqual(self.client.post("/infer", json=request, headers=self.headers).status_code, 409)
-        request["calibration_sha256"] = "test-calibration"
-        request["state"]["left_hand"] = [[0, 0, 0]]
-        self.assertEqual(self.client.post("/infer", json=request, headers=self.headers).status_code, 422)
+    def test_navigation_handoff_uses_kitchen_station(self):
+        station = load_station()
+        validate_handoff(*station.position_xy_m, station.yaw_rad)
+        with self.assertRaisesRegex(ValueError, "交接"):
+            validate_handoff(
+                station.position_xy_m[0] + 0.2,
+                station.position_xy_m[1], station.yaw_rad,
+            )
+
+    def test_stale_sonic_state_is_not_accepted_for_handoff(self):
+        tools = object.__new__(G1ManipulationTools)
+        tools.navigation_pose_provider = lambda: SimpleNamespace(
+            pose=SimpleNamespace(x=3.35, y=-1.10, yaw=1.5707963267948966),
+            monotonic_time=time.monotonic() - 2.0,
+            root_qpos=None,
+            joint_position_hardware=None,
+            motion_active=False,
+        )
+        with self.assertRaisesRegex(RuntimeError, "状态已过期"):
+            tools._navigation_sample()
+
+    def test_navigation_mirror_forwards_full_sonic_state(self):
+        delivered = threading.Event()
+        root = tuple([1.2, -0.4, 0.79, 1.0, 0.0, 0.0, 0.0])
+        joints = tuple(np.linspace(-0.2, 0.2, 29))
+
+        class FakeEnv:
+            def set_navigation_state(self, actual_root, actual_joints):
+                np.testing.assert_allclose(actual_root, root)
+                np.testing.assert_allclose(actual_joints, joints)
+                delivered.set()
+
+        tools = object.__new__(G1ManipulationTools)
+        tools.env = FakeEnv()
+        tools.navigation_pose_provider = lambda: SimpleNamespace(
+            pose=SimpleNamespace(x=1.2, y=-0.4, yaw=0.0),
+            monotonic_time=time.monotonic(),
+            root_qpos=root,
+            joint_position_hardware=joints,
+            motion_active=True,
+        )
+        tools._pose_mirror_stop = threading.Event()
+        thread = threading.Thread(target=tools._mirror_navigation_pose)
+        thread.start()
+        try:
+            self.assertTrue(delivered.wait(0.5))
+        finally:
+            tools._pose_mirror_stop.set()
+            thread.join(timeout=1.0)
+        self.assertFalse(thread.is_alive())
+
+
+class SceneTests(unittest.TestCase):
+    def test_scene_has_one_official_head_camera_and_dex3(self):
+        calibration = load_calibration()
+        scene = ET.parse(SCENE).getroot()
+        include = (SCENE.parent / scene.find("include").get("file")).resolve()
+        robot = ET.parse(include).getroot()
+        cameras = [camera for camera in robot.iter("camera")]
+        self.assertEqual([camera.get("name") for camera in cameras], ["ego_view"])
+        camera = cameras[0]
+        np.testing.assert_allclose(
+            [float(value) for value in camera.get("pos").split()],
+            calibration["camera"]["pos_m"], atol=1e-9,
+        )
+        np.testing.assert_allclose(
+            [float(value) for value in camera.get("xyaxes").split()],
+            calibration["camera"]["xyaxes"], atol=1e-8,
+        )
+        joints = {joint.get("name") for joint in robot.iter("joint")}
+        self.assertTrue(set(JOINT_GROUPS["left_hand"]) <= joints)
+        self.assertTrue(set(JOINT_GROUPS["right_hand"]) <= joints)
+        self.assertIsNotNone(scene.find(".//body[@name='task_apple']"))
+        self.assertIsNotNone(scene.find(".//body[@name='target_plate_body']"))
+        chair = scene.find(".//body[@name='online_chair']")
+        self.assertIsNotNone(chair)
+        self.assertEqual(chair.get("pos"), "3.35 1.22 0")
+        self.assertEqual(len(chair.findall("geom")), 8)
+
+    def test_scene_is_50hz_integral_and_hash_matches(self):
+        scene = ET.parse(SCENE).getroot()
+        timestep = float(scene.find("option").get("timestep"))
+        self.assertAlmostEqual((1 / 50) / timestep, 10.0)
+        include = (SCENE.parent / scene.find("include").get("file")).resolve()
+        robot = ET.parse(include).getroot()
+        text = robot.find("./custom/text[@name='calibration_sha256']")
+        self.assertEqual(text.get("data"), calibration_hash(load_calibration()))
 
 
 @unittest.skipUnless(importlib.util.find_spec("mujoco"), "需要 MuJoCo")
 class PhysicsTests(unittest.TestCase):
     def setUp(self):
         from .runtime import G1ManipulationEnv
-        self.env = G1ManipulationEnv()
+        self.env = G1ManipulationEnv(viewer_enabled=False)
 
     def tearDown(self):
         self.env.close()
 
-    def target(self):
-        return {k: v for k, v in self.env.state().items() if not k.endswith("eef_9d")}
+    def test_state_and_actuator_scope_match_gn1x(self):
+        self.assertEqual(
+            {key: value.shape[0] for key, value in self.env.state().items()},
+            STATE_DIMS,
+        )
+        self.assertEqual(self.env.model.nu, 43)
+        self.assertEqual(len(self.env.navigation_joints), 29)
+        self.assertEqual(
+            tuple(self.env.model.joint(int(joint_id)).name
+                  for joint_id in self.env.navigation_joints),
+            SONIC_JOINTS,
+        )
 
-    def test_fixed_lower_body_and_named_joint_order(self):
-        env = self.env
-        pelvis = env.data.body("pelvis").xpos.copy()
-        foot = env.data.body("left_ankle_roll_link").xpos.copy()
-        target = self.target()
-        target["left_arm"] = np.array([0.5, 0.2, 0, 1, 0, 0, 0])
-        target["waist"] = np.array([0.2, 0, 0])
-        for _ in range(30):
-            env.step(target)
-        np.testing.assert_array_equal(env.data.body("pelvis").xpos, pelvis)
-        np.testing.assert_array_equal(env.data.body("left_ankle_roll_link").xpos, foot)
-        self.assertGreater(env.state()["left_arm"][0], 0.35)
-        self.assertEqual(env.model.nu, 19)  # 17 上半身关节 + 2 夹爪驱动
+    def test_sonic_full_body_state_maps_into_visible_dex3_scene(self):
+        joints = np.linspace(-0.2, 0.2, 29)
+        root = np.asarray([1.2, -0.4, 0.79, 1.0, 0.0, 0.0, 0.0])
+        self.env.set_navigation_state(root, joints)
+        np.testing.assert_allclose(
+            self.env.data.qpos[self.env.navigation_qadr], joints, atol=1e-9
+        )
+        np.testing.assert_allclose(
+            self.env.model.body_pos[self.env.model.body("pelvis").id], root[:3],
+            atol=1e-9,
+        )
 
-    def test_grippers_close_open_and_remain_symmetric(self):
-        target = self.target()
-        target.update(left_hand=[0], right_hand=[0])
-        for _ in range(30):
-            self.env.step(target)
-        self.assertLess(self.env.state()["left_hand"][0], 0.03)
-        target.update(left_hand=[1], right_hand=[1])
-        for _ in range(30):
-            self.env.step(target)
-        self.assertGreater(self.env.state()["left_hand"][0], 0.97)
-        for side in ("left", "right"):
-            q = [self.env.data.qpos[self.env.model.joint(f"{side}_finger_{f}_joint").qposadr[0]] for f in ("a", "b")]
-            self.assertLess(abs(q[0] - q[1]), 1e-4)
-
-    def test_atomic_rejection_and_velocity_limit(self):
-        target = self.target()
-        old_ctrl = self.env.data.ctrl.copy()
-        target["right_hand"] = [float("inf")]
-        with self.assertRaises(ValueError):
-            self.env.step(target)
-        np.testing.assert_array_equal(self.env.data.ctrl, old_ctrl)
-        target = self.target()
-        target["left_arm"][0] = 1.2
+    def test_dex3_open_close_and_speed_limit(self):
+        target = self.env.hold_target()
+        target["left_hand"] = self.env.closed_hand_pose("left")
+        before = self.env.data.ctrl[self.env.actuators["left_hand"]].copy()
         self.env.step(target)
-        actuator = self.env.model.actuator("left_shoulder_pitch_joint").id
-        self.assertAlmostEqual(self.env.data.ctrl[actuator] - old_ctrl[actuator], self.env.dt)
+        max_delta = self.env.calibration["execution"]["max_hand_speed_rad_s"] * self.env.dt
+        self.assertLessEqual(
+            float(np.max(np.abs(self.env.data.ctrl[self.env.actuators["left_hand"]] - before))),
+            max_delta + 1e-9,
+        )
+        for _ in range(30):
+            self.env.step(target)
+        self.assertLess(self.env.hand_opening("left"), 0.15)
+        target["left_hand"] = self.env.open_hand_pose("left")
+        for _ in range(80):
+            self.env.step(target)
+        self.assertGreater(self.env.hand_opening("left"), 0.85)
 
-    def test_history_and_checkpoint_mismatch(self):
-        metadata = sim_metadata()
-        with self.assertRaisesRegex(ValueError, "历史"):
-            self.env.request("test", metadata)
-        # 合成图像用于检查索引；真实运行由 capture() 在每个控制周期采集。
-        for i in range(21):
-            self.env.history.append(np.full((2, 2, 3), i, np.uint8))
-        obs = observation_from_request(self.env.request("test", metadata), metadata)
-        np.testing.assert_array_equal(obs["video"]["ego_view"][0, :, 0, 0, 0], [0, 20])
-        changed = copy.deepcopy(metadata)
-        changed["state_dims"]["left_hand"] = 7
-        with self.assertRaisesRegex(ValueError, "NEW_EMBODIMENT"):
-            self.env.validate_server(changed)
+    def test_policy_action_uses_only_upper_body_keys(self):
+        target = self.env.policy_target(self.env.hold_target())
+        self.assertEqual(set(target), set(JOINT_GROUPS))
 
-    def test_camera_direction_and_eef_reference(self):
-        camera = self.env.model.camera("ego_view").id
-        look = -self.env.data.cam_xmat[camera].reshape(3, 3)[:, 2]
-        self.assertGreater(look[0], 0.7)
-        self.assertLess(look[2], -0.4)
-        state = self.env.state()
-        for side in ("left", "right"):
-            wrist = self.env.data.site(f"{side}_wrist_eef").xpos
-            pelvis = self.env.data.body("pelvis").xpos
-            np.testing.assert_allclose(state[f"{side}_wrist_eef_9d"][:3], wrist - pelvis, atol=1e-6)
-
-    def test_calibration_mismatch_requires_rebuild(self):
-        import json
-        from .contract import CALIBRATION
-        from .runtime import G1ManipulationEnv
-        changed = json.loads(CALIBRATION.read_text())
-        changed["camera"]["pos_m"][0] += 0.01
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "calibration.json"
-            path.write_text(json.dumps(changed))
-            with self.assertRaisesRegex(ValueError, "build_scene"):
-                G1ManipulationEnv(calibration_path=path)
+    def test_camera_and_request_contract(self):
+        rgb = self.env.render("ego_view")
+        self.assertEqual(rgb.shape, (480, 640, 3))
+        camera_id = self.env.model.camera("ego_view").id
+        look = -self.env.data.cam_xmat[camera_id].reshape(3, 3)[:, 2]
+        self.assertLess(look[2], -0.5)
+        request = self.env.request(TASKS[DEFAULT_TASK].instruction, sim_metadata())
+        self.assertEqual(set(request["state"]), set(STATE_DIMS))
+        self.assertEqual(len(request["video"]["ego_view"]), 1)
 
 
 if __name__ == "__main__":

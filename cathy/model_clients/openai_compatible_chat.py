@@ -21,6 +21,7 @@ from ..contracts import (
     ModelResponse,
     ModelTool,
     ModelToolCall,
+    ModelTurnState,
 )
 from ..contracts.content import attachment_from_dict
 from ..llm_errors import LLMCallError, classify_llm_exception
@@ -145,11 +146,15 @@ class OpenAICompatibleChatClient:
         reasoning_parts: list[str] = []
         tool_calls: dict[int, dict[str, str]] = {}
         last_chunk: Any = None
+        response_id: str | None = None
 
         yield ModelEvent(type="response_started")
         try:
             async for chunk in stream:
                 last_chunk = chunk
+                chunk_id = getattr(chunk, "id", None)
+                if chunk_id:
+                    response_id = str(chunk_id)
                 choices = getattr(chunk, "choices", None) or []
                 if not choices:
                     continue
@@ -216,6 +221,9 @@ class OpenAICompatibleChatClient:
                 for _, state in sorted(tool_calls.items())
             ),
             reasoning="".join(reasoning_parts) or None,
+            next_turn_state=(
+                ModelTurnState(response_id) if response_id is not None else None
+            ),
             raw=last_chunk,
         )
         yield ModelEvent(type="response_completed", response=response)
@@ -464,5 +472,10 @@ def normalize_chat_response(response: Any) -> ModelResponse:
         text=str(getattr(message, "content", None) or ""),
         tool_calls=tuple(tool_calls),
         reasoning=getattr(message, "reasoning_content", None),
+        next_turn_state=(
+            ModelTurnState(str(response.id))
+            if getattr(response, "id", None)
+            else None
+        ),
         raw=response,
     )

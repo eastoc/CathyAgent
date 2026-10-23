@@ -22,8 +22,8 @@ def _vector(value, size, name):
 
 def load_vla_config(path: str | Path) -> dict[str, Any]:
     cfg = _load_yaml(path)
-    if cfg.get("backend") not in {"robosuite_dual_panda", "native_aloha"} or cfg.get("control_mode") != "vla_mcp":
-        raise ValueError("VLA 入口需要 native_aloha 或 robosuite_dual_panda / vla_mcp 场景")
+    if cfg.get("backend") not in {"robosuite_dual_panda", "native_aloha"}:
+        raise ValueError("VLA 后端需要 native_aloha 或 robosuite_dual_panda 场景")
     aloha = cfg["backend"] == "native_aloha"
     if cfg.get("schema_version") != 1:
         raise ValueError("VLA 场景只支持 schema_version=1")

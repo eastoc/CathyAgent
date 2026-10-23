@@ -1,0 +1,10 @@
+type: openai_responses
+api_key: ${OPENAI_API_KEY}
+api_base: https://api365.cc/v1
+model: gpt-6-astra
+reasoning_effort: medium
+max_output_tokens: 30000
+store: true
+parallel_tool_calls: true
+async_tools: false # gpt-6-astra 不接受工具 schema 中的 async 字段
+use_previous_response_id: false # 第三方中转使用完整历史续传

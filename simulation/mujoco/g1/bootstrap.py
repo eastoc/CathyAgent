@@ -17,7 +17,7 @@ def register_g1_navigation(
     *,
     environment: str | Path | None,
     artifacts: LocalArtifactStore,
-) -> None:
+) -> G1NavigationToolPlugin:
     plugin = G1NavigationToolPlugin()
     plugin.initialize(
         {
@@ -27,6 +27,33 @@ def register_g1_navigation(
     )
     manifest = parse_manifest(Path(__file__).with_name("plugin.yaml"))
     registry.register_internal_plugin(manifest, plugin, skip_initialize=True)
+    return plugin
 
 
-__all__ = ["register_g1_navigation"]
+def register_g1_vla(
+    registry,
+    *,
+    environment: str | Path | None,
+    artifacts: LocalArtifactStore,
+    viewer_enabled: bool | None = None,
+) -> tuple[G1NavigationToolPlugin, Any]:
+    """同时注册导航与GN1x Arena manipulation，并用真实导航位姿约束技能交接。"""
+
+    navigation = register_g1_navigation(
+        registry,
+        environment=environment,
+        artifacts=artifacts,
+    )
+    from .manipulation.bootstrap import register_g1_manipulation
+
+    assert navigation.service is not None
+    manipulation = register_g1_manipulation(
+        registry,
+        artifacts=artifacts,
+        navigation_pose_provider=navigation.current_state,
+        viewer_enabled=viewer_enabled is True,
+    )
+    return navigation, manipulation
+
+
+__all__ = ["register_g1_navigation", "register_g1_vla"]

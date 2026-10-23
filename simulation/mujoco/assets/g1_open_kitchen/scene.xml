@@ -33,6 +33,7 @@
     <material name="island_mat" rgba="0.48 0.57 0.60 1"/>
     <material name="fridge_mat" rgba="0.70 0.73 0.75 1" specular="0.45" shininess="0.55"/>
     <material name="bin_mat" rgba="0.12 0.14 0.15 1"/>
+    <material name="chair_mat" rgba="0.48 0.25 0.11 1" specular="0.12" shininess="0.18"/>
   </asset>
 
   <worldbody>
@@ -56,10 +57,50 @@
             rgba="0.55 0.58 0.60 1" contype="0" conaffinity="0"/>
     </body>
 
-    <!-- Central island creates two equivalent routes for A*. -->
+    <!-- Central island creates two equivalent routes for D* Lite. -->
     <body name="kitchen_island" pos="3.35 0 0">
       <geom name="island_base" class="kitchen-static" type="box" pos="0 0 0.43" size="1.20 0.50 0.43" material="island_mat"/>
       <geom name="island_top" class="kitchen-static" type="box" pos="0 0 0.89" size="1.28 0.58 0.035" material="countertop_mat"/>
+    </body>
+
+    <!--
+      未建图在线障碍：位于起点到冰箱的岛台北侧默认路径上。
+      这些 geom 有真实碰撞，但故意不列入 navigation.yaml 的 static_obstacles；
+      在线障碍层应在运行时观测到它们并触发 D* Lite 改走岛台南侧。
+    -->
+    <body name="online_chair" pos="3.35 1.22 0">
+      <geom name="online_chair_seat" class="kitchen-static" type="box"
+            pos="0 0 0.48" size="0.28 0.25 0.035" material="chair_mat"/>
+      <geom name="online_chair_leg_front_left" class="kitchen-static" type="box"
+            pos="0.22 -0.19 0.23" size="0.025 0.025 0.23" material="chair_mat"/>
+      <geom name="online_chair_leg_front_right" class="kitchen-static" type="box"
+            pos="-0.22 -0.19 0.23" size="0.025 0.025 0.23" material="chair_mat"/>
+      <geom name="online_chair_leg_back_left" class="kitchen-static" type="box"
+            pos="0.22 0.19 0.23" size="0.025 0.025 0.23" material="chair_mat"/>
+      <geom name="online_chair_leg_back_right" class="kitchen-static" type="box"
+            pos="-0.22 0.19 0.23" size="0.025 0.025 0.23" material="chair_mat"/>
+      <geom name="online_chair_back_left" class="kitchen-static" type="box"
+            pos="0.22 0.21 0.76" size="0.025 0.025 0.25" material="chair_mat"/>
+      <geom name="online_chair_back_right" class="kitchen-static" type="box"
+            pos="-0.22 0.21 0.76" size="0.025 0.025 0.25" material="chair_mat"/>
+      <geom name="online_chair_backrest" class="kitchen-static" type="box"
+            pos="0 0.21 0.82" size="0.24 0.025 0.13" material="chair_mat"/>
+    </body>
+
+    <!-- 导航 Viewer 的任务预览；无碰撞，实际抓放物体由 Dex3 manipulation 场景创建。 -->
+    <body name="navigation_task_preview">
+      <geom name="navigation_red_can_preview" type="cylinder" pos="3.18 -0.525 1.005"
+            size="0.028 0.08" rgba="0.82 0.06 0.04 1" contype="0" conaffinity="0"/>
+      <geom name="navigation_can_bin_base_preview" type="box" pos="3.54 -0.50 0.937"
+            size="0.09 0.08 0.012" rgba="0.30 0.33 0.36 1" contype="0" conaffinity="0"/>
+      <geom name="navigation_can_bin_left_preview" type="box" pos="3.46 -0.50 0.995"
+            size="0.01 0.08 0.07" rgba="0.34 0.37 0.40 1" contype="0" conaffinity="0"/>
+      <geom name="navigation_can_bin_right_preview" type="box" pos="3.62 -0.50 0.995"
+            size="0.01 0.08 0.07" rgba="0.34 0.37 0.40 1" contype="0" conaffinity="0"/>
+      <geom name="navigation_can_bin_front_preview" type="box" pos="3.54 -0.57 0.995"
+            size="0.07 0.01 0.07" rgba="0.34 0.37 0.40 1" contype="0" conaffinity="0"/>
+      <geom name="navigation_can_bin_back_preview" type="box" pos="3.54 -0.43 0.995"
+            size="0.07 0.01 0.07" rgba="0.34 0.37 0.40 1" contype="0" conaffinity="0"/>
     </body>
 
     <!-- Refrigerator and a low obstacle exercise tall/short obstacle mapping. -->
